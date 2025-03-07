@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from abc import ABCMeta, abstractmethod, abstractproperty
+from abc import ABCMeta, abstractmethod
 from copy import deepcopy
 from enum import Enum
 from logging import Logger
@@ -183,7 +183,8 @@ class Parameter(SortableBase, metaclass=ABCMeta):
 
         return ret_val
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def domain_repr(self) -> str:
         """Returns a string representation of the domain."""
         pass

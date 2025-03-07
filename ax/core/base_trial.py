@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod, abstractproperty
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -435,11 +435,13 @@ class BaseTrial(ABC, SortableBase):
             )
         self._generation_step_index = generation_step_index
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def arms(self) -> list[Arm]:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def arms_by_name(self) -> dict[str, Arm]:
         pass
 
@@ -447,7 +449,8 @@ class BaseTrial(ABC, SortableBase):
     def __repr__(self) -> str:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def abandoned_arms(self) -> list[Arm]:
         """All abandoned arms, associated with this trial."""
         pass
@@ -457,7 +460,8 @@ class BaseTrial(ABC, SortableBase):
         """All non abandoned arms associated with this trial."""
         return [arm for arm in self.arms if arm not in self.abandoned_arms]
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def generator_runs(self) -> list[GeneratorRun]:
         """All generator runs associated with this trial."""
         pass

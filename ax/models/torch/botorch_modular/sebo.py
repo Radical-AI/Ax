@@ -72,9 +72,14 @@ class SEBOAcquisition(Acquisition):
         self.sparsity_threshold: int = options.pop(
             "sparsity_threshold", surrogate.Xs[0].shape[-1]
         )
+        self.sparsity_lower_bound: Tensor = options.pop(
+            "sparsity_lower_bound", torch.tensor(0.0)
+        )
         # construct determinsitic model for penalty term
         # pyre-fixme[4]: Attribute must be annotated.
-        self.deterministic_model = self._construct_penalty()
+        self.deterministic_model = self._construct_penalty(
+            sparsity_lower_bound=self.sparsity_lower_bound
+        )
         surrogate_f = deepcopy(surrogate)
         # we need to clamp the training data to the target point here as it may
         # be slightly off due to numerical issues.
@@ -129,17 +134,22 @@ class SEBOAcquisition(Acquisition):
         self.acqf.ref_point[-1] = self.sparsity_threshold * -1
         self._objective_thresholds[-1] = self.sparsity_threshold  # pyre-ignore
 
-    def _construct_penalty(self) -> GenericDeterministicModel:
+    def _construct_penalty(
+        self, sparsity_lower_bound: Tensor = torch.tensor(0.0)
+    ) -> GenericDeterministicModel:
         """Construct a penalty term as deterministic model to be included in
         SEBO acqusition function. Currently only L0 and L1 penalty are supported.
         """
         if self.penalty_name == "L0_norm":
-            L0 = L0Approximation(target_point=self.target_point)
+            L0 = L0Approximation(
+                target_point=self.target_point, lower_bound=sparsity_lower_bound
+            )
             return GenericDeterministicModel(f=L0)
         elif self.penalty_name == "L1_norm":
             L1 = functools.partial(
                 L1_norm_func,
                 init_point=self.target_point,
+                lower_bound=sparsity_lower_bound,
             )
             return GenericDeterministicModel(f=L1)
         else:
@@ -331,12 +341,20 @@ class SEBOAcquisition(Acquisition):
         )
 
 
-def L1_norm_func(X: Tensor, init_point: Tensor) -> Tensor:
+def L1_norm_func(
+    X: Tensor, init_point: Tensor, lower_bound: Tensor = torch.tensor(0.0)
+) -> Tensor:
     r"""L1_norm takes in a a `batch_shape x n x d`-dim input tensor `X`
     to a `batch_shape x n x 1`-dimensional L1 norm tensor. To be used
     for constructing a GenericDeterministicModel.
     """
-    return torch.linalg.norm((X - init_point), ord=1, dim=-1, keepdim=True)
+    return (
+        torch.relu(
+            torch.linalg.norm((X - init_point), ord=1, dim=-1, keepdim=True)
+            - lower_bound
+        )
+        + lower_bound
+    )
 
 
 def clamp_to_target(X: Tensor, target_point: Tensor, clamp_tol: float) -> Tensor:

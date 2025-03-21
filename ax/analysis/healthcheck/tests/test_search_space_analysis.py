@@ -7,7 +7,7 @@
 
 
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.healthcheck.search_space_analysis import (
     boundary_proportions_message,
     search_space_boundary_proportions,
@@ -35,10 +35,13 @@ class TestSearchSpaceAnalysis(TestCase):
         card = ssa.compute(experiment=experiment)
 
         self.assertEqual(card.level, AnalysisCardLevel.LOW)
+        self.assertEqual(card.category, AnalysisCardCategory.DIAGNOSTIC)
         self.assertEqual(card.name, "SearchSpaceAnalysis")
         self.assertEqual(card.title, "Ax Search Space Analysis Warning")
-        print(card.subtitle)
         subtitle = (
+            "The search space analysis health check is designed "
+            "to notify users that would likely see from a search space expansion "
+            "in the form of increased optimization performance.\n\n"
             "\n - Parameter x1 values are at their lower bound in 66.67% of all "
             "suggested parameters, which exceeds the threshold of 50.00%. "
             "Consider decreasing this lower bound of the search space and "
@@ -57,7 +60,15 @@ class TestSearchSpaceAnalysis(TestCase):
         self.assertEqual(card.level, AnalysisCardLevel.LOW)
         self.assertEqual(card.name, "SearchSpaceAnalysis")
         self.assertEqual(card.title, "Ax Search Space Analysis Success")
-        self.assertEqual(card.subtitle, "Search space does not need to be updated.")
+        self.assertEqual(
+            card.subtitle,
+            (
+                "The search space analysis health check is designed "
+                "to notify users that would likely see from a search space expansion "
+                "in the form of increased optimization performance.\n\n"
+                "Search space does not need to be updated."
+            ),
+        )
 
         arms = [
             Arm(name="2_0", parameters={"x1": 5.0, "x2": 1.0}),

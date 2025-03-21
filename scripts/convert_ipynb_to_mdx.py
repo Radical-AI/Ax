@@ -196,10 +196,53 @@ def create_buttons(
     return f'<LinkButtons\n  githubUrl="{github_url}"\n  colabUrl="{colab_url}"\n/>\n\n'
 
 
-def handle_images_found_in_markdown(
+def handle_image_attachments(
+    markdown: str,
+    attachments: dict[str, dict[str, str]],
+) -> str:
+    """
+    Image attachments are stored in the notebook cell's "attachments" field in base64
+    format with their associated mime_type and referenced in the markdown via
+    attachment name.
+
+    The pattern we search for in the Markdown is
+    `![alt_text](attachment:attachment_name title)` with three groups:
+
+    - group 1 = alt_text (optional)
+    - group 2 = attachment_name
+    - group 3 = title (optional)
+
+    To represent this in MD we replace the attachment reference with the base64 encoded
+    string as `![{alt_text}](data:{mime_type};base64,{img_as_base64})`
+
+    Args:
+        markdown (str): The markdown content containing image attachments.
+        attachments (Dict[str, Dict[str, str]]): A dictionary of attachments with their
+            corresponding MIME types and base64 encoded data.
+
+    Returns:
+        str: The markdown content with images converted to base64 format.
+    """
+    markdown_image_pattern = re.compile(
+        r"""!\[([^\]]*)\]\(attachment:(.*?)(?=\"|\))(\".*\")?\)"""
+    )
+    searches = re.finditer(markdown_image_pattern, markdown)
+    for search in searches:
+        alt_text, attachment_name, _ = search.groups()
+        mime_type, base64 = next(iter(attachments[attachment_name].items()))
+        start, end = search.span()
+        markdown = (
+            markdown[:start]
+            + generate_img_base64_md(base64, mime_type, alt_text)
+            + markdown[end:]
+        )
+    return markdown
+
+
+def handle_image_paths_found_in_markdown(
     markdown: str,
     new_img_dir: Path,
-    lib_dir: Path,
+    nb_path: Path,
 ) -> str:
     """
     Update image paths in the Markdown, and copy the image to the docs location.
@@ -210,6 +253,9 @@ def handle_images_found_in_markdown(
     - group 1 = path/to/image.png
     - group 2 = "title"
 
+    We explicitly exclude matching if the path starts with `attachment:` as this
+    indicates that the image is embedded as a base64 attachment not a file path.
+
     The first group (the path to the image from the original notebook) will be replaced
     with ``assets/img/{name}`` where the name is `image.png` from the example above. The
     original image will also be copied to the new location
@@ -219,12 +265,15 @@ def handle_images_found_in_markdown(
         markdown (str): Markdown where we look for Markdown flavored images.
         new_img_dir (Path): Path where images are copied to for display in the
             MDX file.
-        lib_dir (Path): The location for the Bean Machine repo.
+        lib_dir (Path): The location for the repo.
+        nb_path (Path): The location for the notebook.
 
     Returns:
         str: The original Markdown with new paths for images.
     """
-    markdown_image_pattern = re.compile(r"""!\[[^\]]*\]\((.*?)(?=\"|\))(\".*\")?\)""")
+    markdown_image_pattern = re.compile(
+        r"""!\[[^\]]*\]\((?!attachment:)(.*?)(?=\"|\))(\".*\")?\)"""
+    )
     searches = list(re.finditer(markdown_image_pattern, markdown))
 
     # Return the given Markdown if no images are found.
@@ -250,11 +299,11 @@ def handle_images_found_in_markdown(
 
         # Copy the original image to the new location.
         if old_path.exists():
+            # resolves if an absolute path is used
             old_img_path = old_path
         else:
-            # Here we assume the original image exists in the same directory as the
-            # notebook, which should be in the tutorials folder of the library.
-            old_img_path = (lib_dir / "tutorials" / old_path).resolve()
+            # fall back to path relative to the notebook
+            old_img_path = (nb_path.parent / old_path).resolve()
         new_img_path = str(new_img_dir / name)
         shutil.copy(str(old_img_path), new_img_path)
 
@@ -323,10 +372,6 @@ def sanitize_mdx(mdx: str) -> str:
     mdx = re.sub("([^\\\\])([{}])", "\\g<1>\\\\\\g<2>", mdx)
 
     # -- KaTeX --
-    # Wrap '\begin{}...\end{}' in $$ for KaTeX to work.
-    mdx = re.sub(
-        "(\\\\begin\\\\{(\\w*?)\\\\}(.|\n)*?end\\\\{\\2\\\\})", "$$\\g<1>$$", mdx
-    )
     # Make sure $$ symbols are not escaped and include line breaks.
     mdx = re.sub(
         "\\\\?\\$\\\\?\\$((?:.|\n)*?)\\\\?\\$\\\\?\\$", "\n$$\n\\g<1>\n$$\n", mdx
@@ -341,10 +386,29 @@ def sanitize_mdx(mdx: str) -> str:
     return mdx
 
 
+def get_source(cell: NotebookNode) -> str:
+    """
+    Extract the source code from a Jupyter notebook cell. The source is
+    characteristically multi-line strings but may be stored as a list of strings, in
+    which case we join them together.
+    https://ipython.readthedocs.io/en/3.x/notebook/nbformat.html
+
+    Args:
+        cell (NotebookNode): A Jupyter notebook cell object.
+
+    Returns:
+        str: The source code as a string.
+    """
+    source = cell.get("source", "")
+    if isinstance(source, list):
+        return "".join(source)
+    return source
+
+
 def handle_markdown_cell(
     cell: NotebookNode,
     new_img_dir: Path,
-    lib_dir: Path,
+    nb_path: Path,
 ) -> str:
     """
     Handle the given Jupyter Markdown cell and convert it to MDX.
@@ -353,17 +417,17 @@ def handle_markdown_cell(
         cell (NotebookNode): Jupyter Markdown cell object.
         new_img_dir (Path): Path where images are copied to for display in the
             Markdown cell.
-        lib_dir (Path): The location for the Bean Machine library.
+        lib_dir (Path): The location for the library.
+        nb_path (Path): The location for the notebook.
 
     Returns:
         str: Transformed Markdown object suitable for inclusion in MDX.
     """
-    markdown = cell["source"]
+    markdown = get_source(cell)
 
-    # Update image paths in the Markdown and copy them to the Markdown tutorials folder.
-    # Skip - Our images are base64 encoded, so we don't need to copy them to the docs
-    # folder.
-    # markdown = handle_images_found_in_markdown(markdown, new_img_dir, lib_dir)
+    # Handle the different ways images are included in the Markdown.
+    markdown = handle_image_paths_found_in_markdown(markdown, new_img_dir, nb_path)
+    markdown = handle_image_attachments(markdown, cell.get("attachments", {}))
 
     markdown = sanitize_mdx(markdown)
     mdx = mdformat.text(markdown, options={"wrap": 88}, extensions={"myst"})
@@ -392,8 +456,28 @@ def handle_cell_input(cell: NotebookNode, language: str) -> str:
     Returns:
         str: Code block formatted Markdown string.
     """
-    cell_source = cell.get("source", "")
+    cell_source = get_source(cell)
     return f"```{language}\n{cell_source}\n```\n\n"
+
+
+def generate_img_base64_md(
+    img_as_base64: int | str | NotebookNode,
+    mime_type: int | str | NotebookNode,
+    alt_text: str = "",
+) -> str:
+    """
+    Generate a markdown image tag from a base64 encoded image.
+
+    Args:
+        img_as_base64 (int | str | NotebookNode): The base64 encoded image data.
+        mime_type (int | str | NotebookNode): The MIME type of the image.
+        alt_text (str, optional): The alternative text for the image. Defaults to an
+            empty string.
+
+    Returns:
+        str: A markdown formatted image tag.
+    """
+    return f"![{alt_text}](data:{mime_type};base64,{img_as_base64})"
 
 
 def handle_image(
@@ -416,7 +500,7 @@ def handle_image(
         index = value["index"]
         mime_type = value["mime_type"]
         img = value["data"]
-        output.append((index, f"![](data:image/{mime_type};base64,{img})\n\n"))
+        output.append((index, f"{generate_img_base64_md(img, mime_type)}\n\n"))
     return output
 
 
@@ -865,7 +949,7 @@ def transform_notebook(path: Path, nb_metadata: object) -> str:
 
         # Handle a Markdown cell.
         if cell_type == "markdown":
-            mdx += handle_markdown_cell(cell, img_folder, LIB_DIR)
+            mdx += handle_markdown_cell(cell, img_folder, path)
 
         # Handle a code cell.
         if cell_type == "code":

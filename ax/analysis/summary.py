@@ -5,10 +5,16 @@
 
 # pyre-strict
 
-from ax.analysis.analysis import Analysis, AnalysisCard, AnalysisCardLevel
+from ax.analysis.analysis import (
+    Analysis,
+    AnalysisCard,
+    AnalysisCardCategory,
+    AnalysisCardLevel,
+)
 from ax.core.experiment import Experiment
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 
 
 class Summary(Analysis):
@@ -22,7 +28,6 @@ class Summary(Analysis):
         - arm_name: The name of the arm
         - trial_status: The status of the trial (e.g. RUNNING, SUCCEDED, FAILED)
         - failure_reason: The reason for the failure, if applicable
-        - generation_method: The model_key of the model that generated the arm
         - generation_node: The name of the ``GenerationNode`` that generated the arm
         - **METADATA: Any metadata associated with the trial, as specified by the
             Experiment's runner.run_metadata_report_keys field
@@ -37,6 +42,7 @@ class Summary(Analysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> AnalysisCard:
         if experiment is None:
             raise UserInputError("`Summary` analysis requires an `Experiment` input")
@@ -45,4 +51,5 @@ class Summary(Analysis):
             subtitle="High-level summary of the `Trial`-s in this `Experiment`",
             level=AnalysisCardLevel.MID,
             df=experiment.to_df(omit_empty_columns=self.omit_empty_columns),
+            category=AnalysisCardCategory.INFO,
         )

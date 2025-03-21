@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.healthcheck.healthcheck_analysis import (
     HealthcheckAnalysis,
@@ -18,6 +18,7 @@ from ax.analysis.healthcheck.healthcheck_analysis import (
 )
 from ax.core.experiment import Experiment
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from pyre_extensions import none_throws
 
 
@@ -47,13 +48,17 @@ class CanGenerateCandidatesAnalysis(HealthcheckAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> HealthcheckAnalysisCard:
         status = HealthcheckStatus.PASS
-        subtitle = self.reason
+        subtitle = (
+            "The candidate generation health check notifies users "
+            "if key criteria for candidate generation are missing. "
+        )
         title_status = "Success"
         level = AnalysisCardLevel.LOW
         if not self.can_generate_candidates:
-            subtitle = f"{self.REASON_PREFIX}{self.reason}"
+            subtitle += f"{self.REASON_PREFIX}{self.reason}"
             most_recent_run_time = max(
                 [
                     t.time_run_started
@@ -77,6 +82,8 @@ class CanGenerateCandidatesAnalysis(HealthcheckAnalysis):
                     level = AnalysisCardLevel.MID
                     title_status = "Warning"
                 subtitle += self.LAST_RUN_TEMPLATE.format(days=days_since_last_run)
+        else:
+            subtitle += f"{self.reason}"
 
         return HealthcheckAnalysisCard(
             name="CanGenerateCandidates",
@@ -94,4 +101,5 @@ class CanGenerateCandidatesAnalysis(HealthcheckAnalysis):
                 }
             ),
             level=level,
+            category=AnalysisCardCategory.DIAGNOSTIC,
         )

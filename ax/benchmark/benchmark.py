@@ -20,7 +20,7 @@ Key terms used:
 """
 
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from itertools import product
 from logging import Logger, WARNING
 from time import monotonic, time
@@ -282,6 +282,91 @@ def _get_oracle_trace_from_arms(
     return np.array(oracle_trace)
 
 
+def _get_inference_trace_from_params(
+    best_params_list: Sequence[Mapping[str, TParamValue]],
+    problem: BenchmarkProblem,
+    n_elements: int,
+) -> npt.NDArray:
+    """
+    Get the inference value of each parameterization in ``best_params_list``.
+
+    ``best_params_list`` can be empty, indicating that inference value is not
+    supported for this benchmark, in which case the returned array will be all
+    NaNs with length ``n_elements``. If it is not empty, it must have length
+    ``n_elements``.
+    """
+    if len(best_params_list) == 0:
+        return np.full(n_elements, np.nan)
+    if len(best_params_list) != n_elements:
+        raise RuntimeError(
+            f"Expected {n_elements} elements in `best_params_list`, got "
+            f"{len(best_params_list)}."
+        )
+    return np.array(
+        [
+            _get_oracle_value_of_params(params=params, problem=problem)
+            for params in best_params_list
+        ]
+    )
+
+
+def _update_benchmark_tracking_vars_in_place(
+    experiment: Experiment,
+    method: BenchmarkMethod,
+    problem: BenchmarkProblem,
+    cost_trace: list[float],
+    evaluated_arms_list: list[set[Arm]],
+    best_params_list: list[Mapping[str, TParamValue]],
+    completed_trial_idcs: set[int],
+) -> None:
+    """
+    Update cost_trace, evaluated_arms_list, best_params_list, and
+    completed_trial_idcs in place.
+    """
+    currently_completed_trial_idcs = {
+        t.index
+        for t in experiment.trials.values()
+        if t.status
+        in (
+            TrialStatus.COMPLETED,
+            TrialStatus.EARLY_STOPPED,
+        )
+    }
+    newly_completed_trials = currently_completed_trial_idcs - completed_trial_idcs
+    completed_trial_idcs |= newly_completed_trials
+
+    is_mf_or_mt = len(problem.target_fidelity_and_task) > 0
+    compute_best_params = not (problem.is_moo or is_mf_or_mt)
+
+    if len(newly_completed_trials) > 0:
+        previous_cost = cost_trace[-1] if len(cost_trace) > 0 else 0.0
+        cost = _get_cumulative_cost(
+            new_trials=newly_completed_trials,
+            experiment=experiment,
+            previous_cost=previous_cost,
+        )
+        cost_trace.append(cost)
+
+        # Track what params are newly evaluated from those trials, for
+        # the oracle trace
+        params = {
+            arm for i in newly_completed_trials for arm in experiment.trials[i].arms
+        }
+        evaluated_arms_list.append(params)
+
+        # Inference trace: Not supported for MOO.
+        # It's also not supported for multi-fidelity or multi-task
+        # problems, because Ax's best-point functionality doesn't know
+        # to predict at the target task or fidelity.
+        if compute_best_params:
+            (best_params,) = method.get_best_parameters(
+                experiment=experiment,
+                optimization_config=problem.optimization_config,
+                n_points=problem.n_best_points,
+            )
+            best_params_list.append(best_params)
+
+
 def benchmark_replication(
     problem: BenchmarkProblem,
     method: BenchmarkMethod,
@@ -347,15 +432,11 @@ def benchmark_replication(
     cost_trace: list[float] = []
     best_params_list: list[Mapping[str, TParamValue]] = []  # For inference trace
     evaluated_arms_list: list[set[Arm]] = []  # For oracle trace
-
-    is_mf_or_mt = len(problem.target_fidelity_and_task) > 0
+    completed_trial_idcs: set[int] = set()
 
     # Run the optimization loop.
     timeout_hours = method.timeout_hours
     remaining_hours = timeout_hours
-
-    previously_completed_trial_idcs: set[int] = set()
-    cost = 0.0
 
     with with_rng_seed(seed=seed), warnings.catch_warnings():
         warnings.filterwarnings(
@@ -374,48 +455,15 @@ def benchmark_replication(
             max_trials=problem.num_trials,
             timeout_hours=remaining_hours,
         ):
-            currently_completed_trials = {
-                t.index
-                for t in experiment.trials.values()
-                if t.status
-                in (
-                    TrialStatus.COMPLETED,
-                    TrialStatus.EARLY_STOPPED,
-                )
-            }
-            newly_completed_trials = (
-                currently_completed_trials - previously_completed_trial_idcs
+            _update_benchmark_tracking_vars_in_place(
+                experiment=experiment,
+                method=method,
+                problem=problem,
+                cost_trace=cost_trace,
+                evaluated_arms_list=evaluated_arms_list,
+                best_params_list=best_params_list,
+                completed_trial_idcs=completed_trial_idcs,
             )
-            previously_completed_trial_idcs = currently_completed_trials
-
-            if len(newly_completed_trials) > 0:
-                cost = _get_cumulative_cost(
-                    new_trials=newly_completed_trials,
-                    experiment=experiment,
-                    previous_cost=cost,
-                )
-                cost_trace.append(cost)
-
-                # Track what params are newly evaluated from those trials, for
-                # the oracle trace
-                params = {
-                    arm
-                    for i in newly_completed_trials
-                    for arm in experiment.trials[i].arms
-                }
-                evaluated_arms_list.append(params)
-
-                # Inference trace: Not supported for MOO.
-                # It's also not supported for multi-fidelity or multi-task
-                # problems, because Ax's best-point functionality doesn't know
-                # to predict at the target task or fidelity.
-                if not (problem.is_moo or is_mf_or_mt):
-                    (best_params,) = method.get_best_parameters(
-                        experiment=experiment,
-                        optimization_config=problem.optimization_config,
-                        n_points=problem.n_best_points,
-                    )
-                    best_params_list.append(best_params)
 
             if timeout_hours is not None:
                 elapsed_hours = (monotonic() - start) / 3600
@@ -426,11 +474,10 @@ def benchmark_replication(
 
         scheduler.summarize_final_result()
 
-    inference_trace = np.array(
-        [
-            _get_oracle_value_of_params(params=params, problem=problem)
-            for params in best_params_list
-        ]
+    inference_trace = _get_inference_trace_from_params(
+        best_params_list=best_params_list,
+        problem=problem,
+        n_elements=len(cost_trace),
     )
     oracle_trace = _get_oracle_trace_from_arms(
         evaluated_arms_list=evaluated_arms_list, problem=problem

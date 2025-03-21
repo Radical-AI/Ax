@@ -9,7 +9,7 @@ from itertools import chain
 from typing import Any
 
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.plotly.arm_effects.utils import (
     get_predictions_by_arm,
@@ -17,7 +17,7 @@ from ax.analysis.plotly.arm_effects.utils import (
 )
 
 from ax.analysis.plotly.plotly_analysis import PlotlyAnalysis, PlotlyAnalysisCard
-from ax.analysis.plotly.utils import is_predictive
+from ax.analysis.plotly.utils import get_adapter, get_nudge_value
 from ax.core import OutcomeConstraint
 from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.experiment import Experiment
@@ -25,7 +25,7 @@ from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
 from ax.modelbridge.base import Adapter
 from ax.modelbridge.transforms.derelativize import Derelativize
-from pyre_extensions import assert_is_instance, none_throws
+from pyre_extensions import none_throws
 
 
 class PredictedEffectsPlot(PlotlyAnalysis):
@@ -68,17 +68,10 @@ class PredictedEffectsPlot(PlotlyAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> PlotlyAnalysisCard:
         if experiment is None:
             raise UserInputError("PredictedEffectsPlot requires an Experiment.")
-        try:
-            generation_strategy = assert_is_instance(
-                generation_strategy, GenerationStrategy
-            )
-        except TypeError as e:
-            raise UserInputError(
-                "PredictedEffectsPlot requires a GenerationStrategy."
-            ) from e
 
         try:
             trial_indices = [
@@ -94,17 +87,13 @@ class PredictedEffectsPlot(PlotlyAnalysis):
                 f"PredictedEffectsPlot cannot be used for {experiment} "
                 "because it has no trials."
             )
-
-        if generation_strategy.model is None:
-            generation_strategy._fit_current_model(data=experiment.lookup_data())
-
-        model = none_throws(generation_strategy.model)
-        if not is_predictive(model=model):
-            raise UserInputError(
-                "PredictedEffectsPlot requires a GenerationStrategy which is "
-                "in a state where the current model supports prediction.  The current "
-                f"model is {model._model_key} and does not support prediction."
-            )
+        adapter = get_adapter(
+            analysis_name=self.name,
+            experiment=experiment,
+            generation_strategy=generation_strategy,
+            adapter=adapter,
+            enforce_supports_predictions=True,
+        )
 
         outcome_constraints = (
             []
@@ -113,12 +102,12 @@ class PredictedEffectsPlot(PlotlyAnalysis):
             .transform_optimization_config(
                 # TODO[T203521207]: move cloning into transform_optimization_config
                 optimization_config=none_throws(experiment.optimization_config).clone(),
-                modelbridge=model,
+                modelbridge=adapter,
             )
             .outcome_constraints
         )
         df = _prepare_data(
-            model=model,
+            adapter=adapter,
             metric_name=self.metric_name,
             candidate_trial=candidate_trial,
             outcome_constraints=outcome_constraints,
@@ -126,29 +115,28 @@ class PredictedEffectsPlot(PlotlyAnalysis):
         fig = prepare_arm_effects_plot(
             df=df, metric_name=self.metric_name, outcome_constraints=outcome_constraints
         )
-
-        level = AnalysisCardLevel.HIGH
-        nudge = -2
-        if experiment.optimization_config is not None:
-            if (
-                self.metric_name
-                in experiment.optimization_config.objective.metric_names
-            ):
-                nudge = 0
-            elif self.metric_name in experiment.optimization_config.metrics:
-                nudge = -1
+        nudge = get_nudge_value(metric_name=self.metric_name, experiment=experiment)
 
         return self._create_plotly_analysis_card(
             title=f"Predicted Effects for {self.metric_name}",
-            subtitle="View a candidate trial and its arms' predicted metric values",
-            level=level + nudge,
+            subtitle=(
+                "The predicted effects plot provides a visualization of the "
+                "estimated metric effects for each arm in the upcoming trial. "
+                "This plot helps in anticipating the potential outcomes and "
+                "performance of different arms based on the model's predictions. "
+                "Note that flat predictions across arms indicate that the model "
+                "has not picked up on sufficient signal in the data, and instead "
+                "is just predicting the mean."
+            ),
+            level=AnalysisCardLevel.HIGH + nudge,
             df=df,
             fig=fig,
+            category=AnalysisCardCategory.ACTIONABLE,
         )
 
 
 def _prepare_data(
-    model: Adapter,
+    adapter: Adapter,
     metric_name: str,
     candidate_trial: BaseTrial,
     outcome_constraints: list[OutcomeConstraint],
@@ -171,7 +159,7 @@ def _prepare_data(
         candidate_trial: Trial to plot candidates for by generator run
     """
     predictions_for_observed_arms: list[dict[str, Any]] = get_predictions_by_arm(
-        model=model,
+        model=adapter,
         metric_name=metric_name,
         outcome_constraints=outcome_constraints,
     )
@@ -180,7 +168,7 @@ def _prepare_data(
         if candidate_trial is None
         else [
             get_predictions_by_arm(
-                model=model,
+                model=adapter,
                 metric_name=metric_name,
                 outcome_constraints=outcome_constraints,
                 gr=gr,

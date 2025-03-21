@@ -7,15 +7,14 @@
 # pyre-strict
 
 
-from typing import Any
+from collections.abc import Mapping, Sequence
 
 from ax.core.data import Data
-
 from ax.core.experiment import Experiment
 from ax.core.observation import Observation, ObservationData, ObservationFeatures
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.search_space import SearchSpace
-from ax.modelbridge.base import Adapter, GenResults
+from ax.modelbridge.base import Adapter, DataLoaderConfig, GenResults
 from ax.modelbridge.modelbridge_utils import (
     extract_parameter_constraints,
     extract_search_space_digest,
@@ -28,80 +27,30 @@ from ax.models.random.base import RandomGenerator
 from ax.models.types import TConfig
 
 
-FIT_MODEL_ERROR = "Model must be fit before {action}."
-
-
 class RandomAdapter(Adapter):
-    """A model bridge for using purely random 'models'.
+    """An adaptor for using purely random ``RandomGenerator``s.
     Data and optimization configs are not required.
 
-    This model bridge interfaces with RandomGenerator.
-
-    Attributes:
-        model: A RandomGenerator used to generate candidates
-            (note: this an awkward use of the word 'model').
-        parameters: Params found in search space on modelbridge init.
-
-    Args:
-        experiment: Is used to get arm parameters. Is not mutated.
-        search_space: Search space for fitting the model. Constraints need
-            not be the same ones used in gen. RangeParameter bounds are
-            considered soft and will be expanded to match the range of the
-            data sent in for fitting, if expand_model_space is True.
-        data: Ax Data.
-        model: Interface will be specified in subclass. If model requires
-            initialization, that should be done prior to its use here.
-        transforms: List of uninitialized transform classes. Forward
-            transforms will be applied in this order, and untransforms in
-            the reverse order.
-        transform_configs: A dictionary from transform name to the
-            transform config dictionary.
-        status_quo_name: Name of the status quo arm. Can only be used if
-            Data has a single set of ObservationFeatures corresponding to
-            that arm.
-        status_quo_features: ObservationFeatures to use as status quo.
-            Either this or status_quo_name should be specified, not both.
-        optimization_config: Optimization config defining how to optimize
-            the model.
-        fit_out_of_design: If specified, all training data are used.
-            Otherwise, only in design points are used.
-        fit_abandoned: Whether data for abandoned arms or trials should be
-            included in model training data. If ``False``, only
-            non-abandoned points are returned.
-        fit_tracking_metrics: Whether to fit a model for tracking metrics.
-            Setting this to False will improve runtime at the expense of
-            models not being available for predicting tracking metrics.
-            NOTE: This can only be set to False when the optimization config
-            is provided.
-        fit_on_init: Whether to fit the model on initialization. This can
-            be used to skip model fitting when a fitted model is not needed.
-            To fit the model afterwards, use `_process_and_transform_data`
-            to get the transformed inputs and call `_fit_if_implemented` with
-            the transformed inputs.
+    Please refer to base ``Adapter`` class for documentation of constructor arguments.
     """
-
-    # pyre-fixme[13]: Attribute `model` is never initialized.
-    model: RandomGenerator
-    # pyre-fixme[13]: Attribute `parameters` is never initialized.
-    parameters: list[str]
 
     def __init__(
         self,
-        search_space: SearchSpace,
-        # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-        model: Any,
-        transforms: list[type[Transform]] | None = None,
-        experiment: Experiment | None = None,
+        *,
+        experiment: Experiment,
+        model: RandomGenerator,
+        search_space: SearchSpace | None = None,
         data: Data | None = None,
-        transform_configs: dict[str, TConfig] | None = None,
-        status_quo_name: str | None = None,
-        status_quo_features: ObservationFeatures | None = None,
+        transforms: Sequence[type[Transform]] | None = None,
+        transform_configs: Mapping[str, TConfig] | None = None,
         optimization_config: OptimizationConfig | None = None,
-        fit_out_of_design: bool = False,
-        fit_abandoned: bool = False,
         fit_tracking_metrics: bool = True,
         fit_on_init: bool = True,
+        data_loader_config: DataLoaderConfig | None = None,
+        fit_out_of_design: bool | None = None,
+        fit_abandoned: bool | None = None,
     ) -> None:
+        self.parameters: list[str] = []
         super().__init__(
             search_space=search_space,
             model=model,
@@ -109,24 +58,23 @@ class RandomAdapter(Adapter):
             experiment=experiment,
             data=data,
             transform_configs=transform_configs,
-            status_quo_name=status_quo_name,
-            status_quo_features=status_quo_features,
             optimization_config=optimization_config,
             expand_model_space=False,
+            data_loader_config=data_loader_config,
             fit_out_of_design=fit_out_of_design,
             fit_abandoned=fit_abandoned,
             fit_tracking_metrics=fit_tracking_metrics,
             fit_on_init=fit_on_init,
         )
+        # Re-assign for more precise typing.
+        self.model: RandomGenerator = model
 
     def _fit(
         self,
-        model: RandomGenerator,
         search_space: SearchSpace,
         observations: list[Observation] | None = None,
     ) -> None:
-        self.model = model
-        # Extract and fix parameters from initial search space.
+        """Extracts the list of parameters from the search space."""
         self.parameters = list(search_space.parameters.keys())
 
     def _gen(
@@ -163,7 +111,9 @@ class RandomAdapter(Adapter):
         )
 
     def _predict(
-        self, observation_features: list[ObservationFeatures]
+        self,
+        observation_features: list[ObservationFeatures],
+        use_posterior_predictive: bool = False,
     ) -> list[ObservationData]:
         """Apply terminal transform, predict, and reverse terminal transform on
         output.
@@ -179,10 +129,5 @@ class RandomAdapter(Adapter):
     ) -> list[ObservationData]:
         raise NotImplementedError
 
-    def _set_status_quo(
-        self,
-        experiment: Experiment | None,
-        status_quo_name: str | None,
-        status_quo_features: ObservationFeatures | None,
-    ) -> None:
+    def _set_status_quo(self, experiment: Experiment) -> None:
         pass

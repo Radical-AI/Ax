@@ -8,7 +8,7 @@
 import json
 
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.healthcheck.healthcheck_analysis import (
     HealthcheckAnalysis,
@@ -17,6 +17,7 @@ from ax.analysis.healthcheck.healthcheck_analysis import (
 )
 from ax.core.experiment import Experiment
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 
 
 class ShouldGenerateCandidates(HealthcheckAnalysis):
@@ -34,6 +35,7 @@ class ShouldGenerateCandidates(HealthcheckAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> HealthcheckAnalysisCard:
         status = (
             HealthcheckStatus.PASS
@@ -57,4 +59,5 @@ class ShouldGenerateCandidates(HealthcheckAnalysis):
             ),
             level=AnalysisCardLevel.CRITICAL,
             attributes=self.attributes,
+            category=AnalysisCardCategory.DIAGNOSTIC,
         )

@@ -5,12 +5,15 @@
 
 # pyre-strict
 
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.plotly.surface.contour import ContourPlot
+from ax.core.trial import Trial
 from ax.exceptions.core import UserInputError
 from ax.service.ax_client import AxClient, ObjectiveProperties
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.mock import mock_botorch_optimize
+
+from pyre_extensions import assert_is_instance, none_throws
 
 
 class TestContourPlot(TestCase):
@@ -68,16 +71,51 @@ class TestContourPlot(TestCase):
         self.assertEqual(card.title, "x, y vs. bar")
         self.assertEqual(
             card.subtitle,
-            "2D contour of the surrogate model's predicted outcomes for bar",
+            (
+                "The contour plot visualizes the predicted outcomes "
+                "for bar across a two-dimensional parameter space, "
+                "with other parameters held fixed at their status_quo value "
+                "(or mean value if status_quo is unavailable). This plot helps "
+                "in identifying regions of optimal performance and understanding "
+                "how changes in the selected parameters influence the predicted "
+                "outcomes. Contour lines represent levels of constant predicted "
+                "values, providing insights into the gradient and potential optima "
+                "within the parameter space."
+            ),
         )
         self.assertEqual(card.level, AnalysisCardLevel.LOW)
+        self.assertEqual(card.category, AnalysisCardCategory.INSIGHT)
         self.assertEqual(
             {*card.df.columns},
             {
                 "x",
                 "y",
                 "bar_mean",
+                "sampled",
             },
         )
         self.assertIsNotNone(card.blob)
         self.assertEqual(card.blob_annotation, "plotly")
+
+        # Assert that any row where sampled is True has a value of x that is
+        # sampled in at least one trial.
+        x_values_sampled = {
+            none_throws(assert_is_instance(trial, Trial).arm).parameters["x"]
+            for trial in self.client.experiment.trials.values()
+        }
+        y_values_sampled = {
+            none_throws(assert_is_instance(trial, Trial).arm).parameters["y"]
+            for trial in self.client.experiment.trials.values()
+        }
+        self.assertTrue(
+            card.df.apply(
+                lambda row: row["x"] in x_values_sampled
+                and row["y"] in y_values_sampled
+                if row["sampled"]
+                else True,
+                axis=1,
+            ).all()
+        )
+
+        # Less-than-or-equal to because we may have removed some duplicates
+        self.assertTrue(card.df["sampled"].sum() <= len(self.client.experiment.trials))

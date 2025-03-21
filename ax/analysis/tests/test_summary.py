@@ -7,12 +7,12 @@
 
 import numpy as np
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.summary import Summary
+from ax.api.client import Client
+from ax.api.configs import ExperimentConfig, ParameterType, RangeParameterConfig
 from ax.core.trial import Trial
 from ax.exceptions.core import UserInputError
-from ax.preview.api.client import Client
-from ax.preview.api.configs import ExperimentConfig, ParameterType, RangeParameterConfig
 from ax.utils.common.testutils import TestCase
 from pyre_extensions import assert_is_instance, none_throws
 
@@ -60,6 +60,7 @@ class TestSummary(TestCase):
             "High-level summary of the `Trial`-s in this `Experiment`",
         )
         self.assertEqual(card.level, AnalysisCardLevel.MID)
+        self.assertEqual(card.category, AnalysisCardCategory.INFO)
         self.assertIsNotNone(card.blob)
         self.assertEqual(card.blob_annotation, "dataframe")
 
@@ -70,7 +71,6 @@ class TestSummary(TestCase):
                 "trial_index",
                 "arm_name",
                 "trial_status",
-                "generation_method",
                 "generation_node",
                 "foo",
                 "bar",
@@ -90,7 +90,6 @@ class TestSummary(TestCase):
                 "trial_index": {0: 0, 1: 1},
                 "arm_name": {0: "0_0", 1: "1_0"},
                 "trial_status": {0: "COMPLETED", 1: "FAILED"},
-                "generation_method": {0: "Sobol", 1: "Sobol"},
                 "generation_node": {0: "Sobol", 1: "Sobol"},
                 "foo": {0: 1.0, 1: np.nan},  # NaN because trial 1 failed
                 "bar": {0: 2.0, 1: np.nan},
@@ -116,7 +115,6 @@ class TestSummary(TestCase):
                 "arm_name",
                 "trial_status",
                 "fail_reason",
-                "generation_method",
                 "generation_node",
                 "foo",
                 "bar",

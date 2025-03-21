@@ -15,11 +15,11 @@ import numpy as np
 import numpy.typing as npt
 from ax.core.types import TGenMetadata, TParamValue, TParamValueList
 from ax.exceptions.constants import TS_MIN_WEIGHT_ERROR, TS_NO_FEASIBLE_ARMS_ERROR
+from ax.exceptions.core import AxWarning, UnsupportedError
 from ax.exceptions.model import ModelError
 from ax.models.discrete_base import DiscreteGenerator
 from ax.models.types import TConfig
 from ax.utils.common.docutils import copy_doc
-
 from pyre_extensions import assert_is_instance, none_throws
 
 
@@ -142,8 +142,15 @@ class ThompsonSampler(DiscreteGenerator):
 
     @copy_doc(DiscreteGenerator.predict)
     def predict(
-        self, X: Sequence[Sequence[TParamValue]]
+        self, X: Sequence[Sequence[TParamValue]], use_posterior_predictive: bool = False
     ) -> tuple[npt.NDArray, npt.NDArray]:
+        if use_posterior_predictive:
+            warnings.warn(
+                f"{self.__class__.__name__} does not support posterior-predictive "
+                "predictions. Ignoring `use_posterior_predictive`. ",
+                AxWarning,
+                stacklevel=2,
+            )
         n = len(X)  # number of parameterizations at which to make predictions
         m = len(none_throws(self.Ys))  # number of outcomes
         f = np.zeros((n, m))  # array of outcome predictions
@@ -154,8 +161,9 @@ class ThompsonSampler(DiscreteGenerator):
             for j, x in enumerate(predictX):
                 # iterate through parameterizations at which to make predictions
                 if x not in X_to_Y_and_Yvar:
-                    raise ValueError(
-                        "ThompsonSampler does not support out-of-sample prediction."
+                    raise UnsupportedError(
+                        "ThompsonSampler does not support out-of-sample prediction. "
+                        f"(X: {X[j]} - note that this is post-transform application)."
                     )
                 f[j, i], cov[j, i, i] = X_to_Y_and_Yvar[
                     assert_is_instance(x, TParamValue)

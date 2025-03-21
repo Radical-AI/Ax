@@ -9,7 +9,7 @@ import json
 
 import pandas as pd
 
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.healthcheck.healthcheck_analysis import (
     HealthcheckAnalysis,
@@ -17,14 +17,14 @@ from ax.analysis.healthcheck.healthcheck_analysis import (
     HealthcheckStatus,
 )
 from ax.analysis.plotly.arm_effects.utils import get_predictions_by_arm
-from ax.analysis.plotly.utils import is_predictive
+from ax.analysis.plotly.utils import get_adapter
 from ax.core.experiment import Experiment
 from ax.core.optimization_config import OptimizationConfig
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
 from ax.modelbridge.base import Adapter
 from ax.modelbridge.transforms.derelativize import Derelativize
-from pyre_extensions import assert_is_instance, none_throws
+from pyre_extensions import assert_is_instance
 
 
 class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
@@ -37,9 +37,8 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
     def __init__(self, prob_threshold: float = 0.95) -> None:
         r"""
         Args:
-            prob_theshold: The threshold for the probability of constraint violation.
+            prob_threhshold: Threshold for the probability of constraint violation.
 
-        Returns None
         """
         self.prob_threshold = prob_threshold
 
@@ -47,6 +46,7 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> HealthcheckAnalysisCard:
         r"""
         Compute the feasibility of the constraints for the experiment.
@@ -54,9 +54,7 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
         Args:
             experiment: Ax experiment.
             generation_strategy: Ax generation strategy.
-            prob_threhshold: Threshold for the probability of constraint violation.
-                Constraints are considered feasible if the probability of constraint
-                violation is below the threshold for at least one arm.
+            adapter: Ax modelbridge adapter
 
         Returns:
             A HealthcheckAnalysisCard object with the information on infeasible metrics,
@@ -68,6 +66,7 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
         title_status = "Success"
         level = AnalysisCardLevel.LOW
         df = pd.DataFrame({"status": [status]})
+        category = AnalysisCardCategory.DIAGNOSTIC
 
         if experiment is None:
             raise UserInputError(
@@ -83,6 +82,7 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
                 subtitle=subtitle,
                 df=df,
                 level=level,
+                category=category,
             )
 
         if (
@@ -97,33 +97,23 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
                 subtitle=subtitle,
                 df=df,
                 level=level,
+                category=category,
             )
 
-        if generation_strategy is None:
-            raise UserInputError(
-                "ConstraintsFeasibilityAnalysis requires a GenerationStrategy."
-            )
-        generation_strategy = assert_is_instance(
-            generation_strategy, GenerationStrategy
+        adapter = get_adapter(
+            analysis_name=self.name,
+            experiment=experiment,
+            generation_strategy=generation_strategy,
+            adapter=adapter,
+            enforce_supports_predictions=True,
         )
 
-        if generation_strategy.model is None:
-            generation_strategy._fit_current_model(data=experiment.lookup_data())
-
-        model = none_throws(generation_strategy.model)
-        if not is_predictive(model=model):
-            raise UserInputError(
-                "ConstraintsFeasibility requires a GenerationStrategy which is "
-                "in a state where the current model supports prediction. "
-                f"The current model is {model._model_key} and does not support "
-                "prediction."
-            )
         optimization_config = assert_is_instance(
             experiment.optimization_config, OptimizationConfig
         )
         constraints_feasible, df = constraints_feasibility(
             optimization_config=optimization_config,
-            model=model,
+            model=adapter,
             prob_threshold=self.prob_threshold,
         )
         df["status"] = status
@@ -131,9 +121,13 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
         if not constraints_feasible:
             status = HealthcheckStatus.WARNING
             subtitle = (
-                "Constraints are infeasible for all test groups (arms) with respect "
-                f"to the probability threshold {self.prob_threshold}. "
-                "We suggest relaxing the constraint bounds for the constraints."
+                "The constraints feasibility health check utilizes "
+                "samples drawn during the optimization process to assess the "
+                "feasibility of constraints set on the experiment. Given these "
+                "samples, the model beleives there is at least a "
+                f"{self.prob_threshold} probability that the constraints will be "
+                "violated. We suggest relaxing the bounds for the constraints "
+                "on this Experiment."
             )
             title_status = "Warning"
             df.loc[
@@ -148,6 +142,7 @@ class ConstraintsFeasibilityAnalysis(HealthcheckAnalysis):
             subtitle=subtitle,
             df=df,
             level=level,
+            category=category,
         )
 
 

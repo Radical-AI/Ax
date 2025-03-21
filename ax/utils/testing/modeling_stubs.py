@@ -21,7 +21,7 @@ from ax.generation_strategy.best_model_selector import (
     ReductionCriterion,
     SingleDiagnosticBestModelSelector,
 )
-from ax.generation_strategy.dispatch_utils import choose_generation_strategy
+from ax.generation_strategy.dispatch_utils import choose_generation_strategy_legacy
 from ax.generation_strategy.generation_node import GenerationNode
 
 from ax.generation_strategy.generation_node_input_constructors import (
@@ -118,24 +118,6 @@ def get_observation_status_quo0(
     )
 
 
-def get_observation_status_quo1(
-    first_metric_name: str = "a",
-    second_metric_name: str = "b",
-) -> Observation:
-    return Observation(
-        features=ObservationFeatures(
-            parameters={"w": 0.85, "x": 1, "y": "baz", "z": False},
-            trial_index=1,
-        ),
-        data=ObservationData(
-            means=np.array([2.0, 4.0]),
-            covariance=np.array([[1.0, 2.0], [3.0, 4.0]]),
-            metric_names=[first_metric_name, second_metric_name],
-        ),
-        arm_name="0_0",
-    )
-
-
 def get_observation1trans(
     first_metric_name: str = "a",
     second_metric_name: str = "b",
@@ -192,19 +174,12 @@ def get_generation_strategy(
 ) -> GenerationStrategy:
     if with_generation_nodes:
         gs = sobol_gpei_generation_node_gs()
-        gs._nodes[0]._model_spec_to_gen_from = GeneratorSpec(
-            model_enum=Generators.SOBOL,
-            model_kwargs={"init_position": 3},
-            model_gen_kwargs={"some_gen_kwarg": "some_value"},
-        )
         if with_callable_model_kwarg:
-            # pyre-ignore[16]: testing hack to test serialization of callable kwargs
-            # in generation steps.
-            gs._nodes[0]._model_spec_to_gen_from.model_kwargs["model_constructor"] = (
+            gs._curr.model_spec_to_gen_from.model_kwargs["model_constructor"] = (
                 get_sobol
             )
     else:
-        gs = choose_generation_strategy(
+        gs = choose_generation_strategy_legacy(
             search_space=get_search_space(), should_deduplicate=True
         )
         if with_callable_model_kwarg:
@@ -230,7 +205,6 @@ def sobol_gpei_generation_node_gs(
     with_input_constructors_remaining_n: bool = False,
     with_input_constructors_repeat_n: bool = False,
     with_input_constructors_target_trial: bool = False,
-    with_input_constructors_sq_features: bool = False,
     with_unlimited_gen_mbm: bool = False,
     with_trial_type: bool = False,
     with_is_SOO_transition: bool = False,
@@ -253,7 +227,6 @@ def sobol_gpei_generation_node_gs(
                 with_input_constructors_remaining_n,
                 with_input_constructors_repeat_n,
                 with_input_constructors_target_trial,
-                with_input_constructors_sq_features,
             ]
         )
         > 1
@@ -386,11 +359,6 @@ def sobol_gpei_generation_node_gs(
         purpose = InputConstructorPurpose.FIXED_FEATURES
         sobol_node._input_constructors = {
             purpose: NodeInputConstructors.TARGET_TRIAL_FIXED_FEATURES,
-        }
-    elif with_input_constructors_sq_features:
-        purpose = InputConstructorPurpose.STATUS_QUO_FEATURES
-        sobol_node._input_constructors = {
-            purpose: NodeInputConstructors.STATUS_QUO_FEATURES,
         }
 
     sobol_mbm_GS_nodes = GenerationStrategy(

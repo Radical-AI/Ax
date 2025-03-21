@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from logging import Logger
 from math import prod
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -257,6 +257,7 @@ def get_branin_experiment(
     with_completed_trial: bool = False,
     num_arms_per_trial: int = 15,
     with_relative_constraint: bool = False,
+    with_absolute_constraint: bool = False,
 ) -> Experiment:
     search_space = search_space or get_branin_search_space(
         with_fidelity_parameter=with_fidelity_parameter,
@@ -270,7 +271,9 @@ def get_branin_experiment(
         search_space=search_space,
         optimization_config=(
             get_branin_optimization_config(
-                minimize=minimize, with_relative_constraint=with_relative_constraint
+                minimize=minimize,
+                with_relative_constraint=with_relative_constraint,
+                with_absolute_constraint=with_absolute_constraint,
             )
             if has_optimization_config or with_relative_constraint
             else None
@@ -298,7 +301,9 @@ def get_branin_experiment(
 
         if with_completed_trial:
             trial.mark_running(no_runner_required=True)
-            exp.attach_data(get_branin_data(trials=[trial]))  # Add data for one trial
+            exp.attach_data(
+                get_branin_data(trials=[trial], metrics=exp.metrics)
+            )  # Add data for one trial
             trial.mark_completed()
 
     return exp
@@ -307,25 +312,22 @@ def get_branin_experiment(
 def get_branin_experiment_with_status_quo_trials(
     num_sobol_trials: int = 5,
     multi_objective: bool = False,
-) -> tuple[Experiment, ObservationFeatures]:
+) -> Experiment:
     if multi_objective:
         exp = get_branin_experiment_with_multi_objective(
             with_batch=True,
             with_status_quo=True,
         )
     else:
-        exp = get_branin_experiment()
+        exp = get_branin_experiment(with_status_quo=True)
     sobol = get_sobol(search_space=exp.search_space)
     for _ in range(num_sobol_trials):
         sobol_run = sobol.gen(n=1)
         t = exp.new_batch_trial().add_generator_run(sobol_run)
-        t.set_status_quo_with_weight(status_quo=t.arms[0], weight=0.5)
+        t.set_status_quo_with_weight(status_quo=exp.status_quo, weight=0.5)
+        exp.attach_data(get_branin_data_batch(batch=t))
         t.run().mark_completed()
-    status_quo_features = ObservationFeatures(
-        parameters=exp.trials[0].status_quo.parameters,  # pyre-fixme [16]
-        trial_index=0,
-    )
-    return exp, status_quo_features
+    return exp
 
 
 def get_robust_branin_experiment(
@@ -577,9 +579,44 @@ def get_factorial_experiment(
     return exp
 
 
-def get_experiment_with_repeated_arms(num_repeated_arms: int) -> Experiment:
-    batch_trial = get_batch_trial_with_repeated_arms(num_repeated_arms)
-    return batch_trial.experiment
+def get_experiment_with_repeated_arms(with_data: bool = False) -> Experiment:
+    batch_trial = get_batch_trial_with_repeated_arms(num_repeated_arms=2)
+    experiment = batch_trial.experiment
+    if with_data:
+        data = Data(
+            df=pd.DataFrame.from_records(
+                [
+                    {
+                        "arm_name": arm_name,
+                        "metric_name": metric_name,
+                        "mean": mean,
+                        "sem": sem,
+                        "trial_index": trial_index,
+                    }
+                    for arm_name, metric_name, mean, sem, trial_index in (
+                        ("0_0", "a", 2.0, 1.0, 0),
+                        ("0_0", "b", 4.0, 4.0, 0),
+                        ("0_0", "a", 2.0, 1.0, 1),
+                        ("0_0", "b", 4.0, 4.0, 1),
+                        ("0_1", "a", 2.0, 1.0, 0),
+                        ("0_1", "b", 4.0, 4.0, 0),
+                        ("0_1", "a", 2.0, 1.0, 1),
+                        ("0_1", "b", 1.0, 5.0, 1),
+                    )
+                ]
+            )
+        )
+        experiment.attach_data(data)
+        # Also add optimization config to prevent data from being thrown out.
+        experiment.optimization_config = MultiObjectiveOptimizationConfig(
+            objective=MultiObjective(
+                objectives=[
+                    Objective(Metric(name="a", lower_is_better=True)),
+                    Objective(Metric(name="b", lower_is_better=True)),
+                ]
+            )
+        )
+    return experiment
 
 
 def get_experiment_with_trial() -> Experiment:
@@ -649,11 +686,13 @@ def get_branin_experiment_with_multi_objective(
     with_completed_trial: bool = False,
     with_relative_constraint: bool = False,
     with_absolute_constraint: bool = False,
+    with_choice_parameter: bool = False,
 ) -> Experiment:
     exp = Experiment(
         name="branin_test_experiment",
         search_space=get_branin_search_space(
-            with_fidelity_parameter=with_fidelity_parameter
+            with_fidelity_parameter=with_fidelity_parameter,
+            with_choice_parameter=with_choice_parameter,
         ),
         optimization_config=(
             get_branin_multi_objective_optimization_config(
@@ -671,7 +710,8 @@ def get_branin_experiment_with_multi_objective(
 
     if with_status_quo:
         # Experiment chooses the name "status_quo" by default
-        exp.status_quo = Arm(parameters={"x1": 0.0, "x2": 0.0})
+        sq_parameters: dict[str, Union[float, str]] = {"x1": 0.0, "x2": 0.0}
+        exp.status_quo = Arm(parameters=sq_parameters)
 
     if with_batch:
         sobol_generator = get_sobol(search_space=exp.search_space, seed=TEST_SOBOL_SEED)
@@ -781,6 +821,8 @@ def get_experiment_with_observations(
     constrained: bool = False,
     with_tracking_metrics: bool = False,
     search_space: SearchSpace | None = None,
+    parameterizations: Sequence[TParameterization] | None = None,
+    with_sem: bool = False,
 ) -> Experiment:
     if observations:
         multi_objective = (len(observations[0]) - constrained) > 1
@@ -856,8 +898,13 @@ def get_experiment_with_observations(
     )
     sobol_generator = get_sobol(search_space=search_space)
     for i, obs in enumerate(observations):
-        # Create a dummy trial to add the observation.
-        trial = exp.new_trial(generator_run=sobol_generator.gen(n=1))
+        if parameterizations is not None:
+            trial = exp.new_trial(
+                generator_run=GeneratorRun(arms=[Arm(parameters=parameterizations[i])])
+            )
+        else:
+            trial = exp.new_trial(generator_run=sobol_generator.gen(1))
+
         data = Data(
             df=pd.DataFrame.from_records(
                 [
@@ -865,7 +912,7 @@ def get_experiment_with_observations(
                         "arm_name": f"{i}_0",
                         "metric_name": f"m{j + 1}",
                         "mean": o,
-                        "sem": None,
+                        "sem": 0.1 if with_sem else None,
                         "trial_index": i,
                     }
                     for j, o in enumerate(obs)
@@ -1278,7 +1325,7 @@ def get_batch_trial(
     weights = get_weights_from_dict(get_arm_weights1())
     batch.add_arms_and_weights(arms=arms, weights=weights, multiplier=0.75)
     if abandon_arm:
-        batch.mark_arm_abandoned(batch.arms[0].name, "abandoned reason")
+        batch.mark_arm_abandoned(batch.arms[2].name, "abandoned reason")
     batch.runner = SyntheticRunner()
     batch.set_status_quo_with_weight(status_quo=arms[0], weight=0.5)
     batch._generation_step_index = 0
@@ -1443,6 +1490,16 @@ def get_ordered_choice_parameter() -> ChoiceParameter:
         # `ax.core.parameter.ChoiceParameter.__init__` but got `List[str]`.
         values=[1, 2, 3],
         is_ordered=True,
+    )
+
+
+def get_sorted_choice_parameter() -> ChoiceParameter:
+    return ChoiceParameter(
+        name="y",
+        parameter_type=ParameterType.STRING,
+        values=["2", "1", "3"],
+        is_ordered=True,
+        sort_values=True,
     )
 
 
@@ -1734,13 +1791,21 @@ def get_optimization_config_no_constraints(
 
 
 def get_branin_optimization_config(
-    minimize: bool = False, with_relative_constraint: bool = False
+    minimize: bool = False,
+    with_relative_constraint: bool = False,
+    with_absolute_constraint: bool = False,
 ) -> OptimizationConfig:
     outcome_constraint = []
     if with_relative_constraint:
         outcome_constraint.append(
             get_outcome_constraint(
                 metric=get_branin_metric(name="branin_d"), relative=True
+            )
+        )
+    if with_absolute_constraint:
+        outcome_constraint.append(
+            get_outcome_constraint(
+                metric=get_branin_metric(name="branin_e"), relative=False
             )
         )
     return OptimizationConfig(
@@ -2048,14 +2113,17 @@ def get_map_key_info() -> MapKeyInfo:
 def get_branin_data(
     trial_indices: Iterable[int] | None = None,
     trials: Iterable[Trial] | None = None,
+    metrics: Iterable[str] | None = None,
 ) -> Data:
     if trial_indices and trials:
         raise ValueError("Expected `trial_indices` or `trials`, not both.")
+    if metrics is None:
+        metrics = ["branin"]
     if trials:
         df_dicts = [
             {
                 "trial_index": trial.index,
-                "metric_name": "branin",
+                "metric_name": metric,
                 "arm_name": none_throws(assert_is_instance(trial, Trial).arm).name,
                 "mean": branin(
                     float(none_throws(none_throws(trial.arm).parameters["x1"])),
@@ -2064,17 +2132,19 @@ def get_branin_data(
                 "sem": 0.0,
             }
             for trial in trials
+            for metric in metrics
         ]
     else:
         df_dicts = [
             {
                 "trial_index": trial_index,
-                "metric_name": "branin",
+                "metric_name": metric,
                 "arm_name": f"{trial_index}_0",
                 "mean": 5.0,
                 "sem": 0.0,
             }
             for trial_index in (trial_indices or [0])
+            for metric in metrics
         ]
     return Data(df=pd.DataFrame.from_records(df_dicts))
 

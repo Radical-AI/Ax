@@ -15,7 +15,6 @@ from collections import defaultdict, OrderedDict
 from collections.abc import Hashable, Iterable, Mapping
 from datetime import datetime
 from functools import partial, reduce
-
 from typing import Any, cast
 
 import ax.core.observation as observation
@@ -1564,7 +1563,20 @@ class Experiment(Base):
 
         # Validate search space membership for all parameterizations
         for parameterization in parameterizations:
-            self.search_space.validate_membership(parameters=parameterization)
+            try:
+                self.search_space.validate_membership(parameters=parameterization)
+            except ValueError as e:
+                # To not raise on out-of-design parameterizations
+                if "is not a valid value for parameter" in str(e):
+                    warnings.warn(
+                        f"Parameterization {parameterization} is in out-of-design. "
+                        "Ax will still attach the trial for use in candidate "
+                        "generation.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    raise e
 
         # Validate number of arm names if any arm names are provided.
         named_arms = False
@@ -1840,7 +1852,6 @@ class Experiment(Base):
             - arm_name: The name of the arm
             - trial_status: The status of the trial (e.g. RUNNING, SUCCEDED, FAILED)
             - failure_reason: The reason for the failure, if applicable
-            - generation_method: The model_key of the model that generated the arm
             - generation_node: The name of the ``GenerationNode`` that generated the arm
             - **METADATA: Any metadata associated with the trial, as specified by the
                 Experiment's runner.run_metadata_report_keys field
@@ -1857,16 +1868,18 @@ class Experiment(Base):
                 for metric in self.metrics.keys():
                     try:
                         observed_means[metric] = data_df[
-                            (data_df["arm_name"] == arm.name)
+                            (data_df["trial_index"] == index)
+                            & (data_df["arm_name"] == arm.name)
                             & (data_df["metric_name"] == metric)
                         ]["mean"].item()
-                    except ValueError:
+                    except (ValueError, KeyError):
+                        # ValueError if there is no row for the (trial, arm, metric).
+                        # KeyError if the df is empty and missing one of the columns.
                         observed_means[metric] = None
 
                 # Find the arm's associated generation method from the trial via the
                 # GeneratorRuns if possible
                 grs = [gr for gr in trial.generator_runs if arm in gr.arms]
-                generation_method = grs[0]._model_key if len(grs) > 0 else None
                 generation_node = grs[0]._generation_node_name if len(grs) > 0 else None
 
                 # Find other metadata from the trial to include from the trial based
@@ -1887,7 +1900,6 @@ class Experiment(Base):
                     "arm_name": arm.name,
                     "trial_status": trial.status.name,
                     "fail_reason": trial.run_metadata.get("fail_reason", None),
-                    "generation_method": generation_method,
                     "generation_node": generation_node,
                     **metadata,
                     **observed_means,

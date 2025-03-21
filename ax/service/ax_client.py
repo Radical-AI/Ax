@@ -55,7 +55,7 @@ from ax.exceptions.core import (
     UserInputError,
 )
 from ax.exceptions.generation_strategy import MaxParallelismReachedException
-from ax.generation_strategy.dispatch_utils import choose_generation_strategy
+from ax.generation_strategy.dispatch_utils import choose_generation_strategy_legacy
 from ax.generation_strategy.generation_strategy import GenerationStrategy
 from ax.global_stopping.strategies.base import BaseGlobalStoppingStrategy
 from ax.global_stopping.strategies.improvement import constraint_satisfaction
@@ -1304,7 +1304,7 @@ class AxClient(AnalysisBase, BestPointMixin, InstantiationBase):
             )
         # Check if we should transition before generating the next candidate.
         self.generation_strategy._maybe_transition_to_next_node()
-        self.generation_strategy._fit_current_model(data=None)
+        self.generation_strategy._curr._fit(experiment=self.experiment)
 
     def verify_trial_parameterization(
         self, trial_index: int, parameterization: TParameterization
@@ -1768,7 +1768,7 @@ class AxClient(AnalysisBase, BestPointMixin, InstantiationBase):
             "enforce_sequential_optimization", self._enforce_sequential_optimization
         )
         if self._generation_strategy is None:
-            self._generation_strategy = choose_generation_strategy(
+            self._generation_strategy = choose_generation_strategy_legacy(
                 search_space=self.experiment.search_space,
                 optimization_config=self.experiment.optimization_config,
                 enforce_sequential_optimization=enforce_sequential_optimization,

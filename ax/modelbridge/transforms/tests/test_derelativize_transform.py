@@ -12,7 +12,7 @@ from unittest import mock
 from unittest.mock import Mock, patch
 
 import numpy as np
-from ax.core.data import Data
+from ax.core.arm import Arm
 from ax.core.experiment import Experiment
 from ax.core.metric import Metric
 from ax.core.objective import Objective
@@ -24,17 +24,17 @@ from ax.core.search_space import SearchSpace
 from ax.core.types import ComparisonOp
 from ax.exceptions.core import DataRequiredError
 from ax.modelbridge.base import Adapter
+from ax.modelbridge.torch import TorchAdapter
 from ax.modelbridge.transforms.derelativize import Derelativize
+from ax.models.base import Generator
+from ax.models.torch.botorch_modular.model import BoTorchGenerator
 from ax.utils.common.testutils import TestCase
+from ax.utils.testing.core_stubs import get_branin_data, get_branin_experiment
+from ax.utils.testing.mock import mock_botorch_optimize
+from pyre_extensions import none_throws
 
 
 class DerelativizeTransformTest(TestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        m = mock.patch.object(Adapter, "__abstractmethods__", frozenset())
-        self.addCleanup(m.stop)
-        m.start()
-
     def test_DerelativizeTransform(self) -> None:
         for negative_metrics in [False, True]:
             sq_sign = -1.0 if negative_metrics else 1.0
@@ -125,12 +125,11 @@ class DerelativizeTransformTest(TestCase):
             ]
         )
         g = Adapter(
-            search_space=search_space,
-            model=None,
-            transforms=[],
-            experiment=Experiment(search_space, "test"),
-            data=Data(),
-            status_quo_name="1_1",
+            experiment=Experiment(
+                search_space=search_space,
+                status_quo=Arm(parameters={"x": 2.0, "y": 10.0}, name="1_1"),
+            ),
+            model=Generator(),
         )
 
         # Test with no relative constraints
@@ -194,7 +193,7 @@ class DerelativizeTransformTest(TestCase):
                 ),
             ]
         )
-        obsf = mock_predict.mock_calls[0][1][1][0]
+        obsf = mock_predict.call_args.kwargs["observation_features"][0]
         obsf2 = ObservationFeatures(parameters={"x": 2.0, "y": 10.0})
         self.assertTrue(obsf == obsf2)
         self.assertEqual(mock_predict.call_count, 1)
@@ -208,12 +207,11 @@ class DerelativizeTransformTest(TestCase):
         # Test with relative constraint, out-of-design status quo
         mock_predict.side_effect = RuntimeError()
         g = Adapter(
-            search_space=search_space,
-            model=None,
-            transforms=[],
-            experiment=Experiment(search_space, "test"),
-            data=Data(),
-            status_quo_name="1_2",
+            experiment=Experiment(
+                search_space=search_space,
+                status_quo=Arm(parameters={"x": None, "y": None}, name="1_2"),
+            ),
+            model=Generator(),
         )
         oc = OptimizationConfig(
             objective=objective,
@@ -258,12 +256,11 @@ class DerelativizeTransformTest(TestCase):
 
         # Raises error if predict fails with in-design status quo
         g = Adapter(
-            search_space=search_space,
-            model=None,
-            transforms=[],
-            experiment=Experiment(search_space, "test"),
-            data=Data(),
-            status_quo_name="1_1",
+            experiment=Experiment(
+                search_space=search_space,
+                status_quo=Arm(parameters={"x": 2.0, "y": 10.0}, name="1_1"),
+            ),
+            model=Generator(),
         )
         oc = OptimizationConfig(
             objective=objective,
@@ -317,13 +314,7 @@ class DerelativizeTransformTest(TestCase):
             t2.transform_optimization_config(deepcopy(oc_scalarized_only), g, None)
 
         # Raises error with relative constraint, no status quo.
-        g = Adapter(
-            search_space=search_space,
-            model=None,
-            transforms=[],
-            experiment=Experiment(search_space, "test"),
-            data=Data(),
-        )
+        g = Adapter(experiment=Experiment(search_space=search_space), model=Generator())
         with self.assertRaises(DataRequiredError):
             t.transform_optimization_config(deepcopy(oc), g, None)
 
@@ -331,7 +322,7 @@ class DerelativizeTransformTest(TestCase):
         with self.assertRaises(ValueError):
             t.transform_optimization_config(deepcopy(oc), None, None)
 
-    def test_Errors(self) -> None:
+    def test_errors(self) -> None:
         t = Derelativize(
             search_space=None,
             observations=[],
@@ -345,8 +336,73 @@ class DerelativizeTransformTest(TestCase):
         search_space = SearchSpace(
             parameters=[RangeParameter("x", ParameterType.FLOAT, 0, 20)]
         )
-        g = Adapter(search_space, None, [])
+        adapter = Adapter(
+            experiment=Experiment(search_space=search_space), model=Generator()
+        )
         with self.assertRaises(ValueError):
-            t.transform_optimization_config(oc, None, None)
+            t.transform_optimization_config(
+                optimization_config=oc, modelbridge=None, fixed_features=None
+            )
         with self.assertRaises(DataRequiredError):
-            t.transform_optimization_config(oc, g, None)
+            t.transform_optimization_config(
+                optimization_config=oc, modelbridge=adapter, fixed_features=None
+            )
+
+    @mock_botorch_optimize
+    def test_with_out_of_design_status_quo(self) -> None:
+        # This test checks that model predictions are not used when the status quo
+        # is out of design, regardless of whether it has data attached.
+
+        # Branin experiment with out of design status quo.
+        # Status quo is 0.0, so we adjust the search space to have it out of design.
+        exp = get_branin_experiment(
+            with_status_quo=True,
+            with_completed_trial=True,
+            with_relative_constraint=True,
+            search_space=SearchSpace(
+                parameters=[
+                    RangeParameter(
+                        name=name,
+                        parameter_type=ParameterType.FLOAT,
+                        lower=5.0,
+                        upper=10.0,
+                    )
+                    for name in ("x1", "x2")
+                ]
+            ),
+        )
+        for attach_data_for_sq in [False, True]:
+            if attach_data_for_sq:
+                # Attach data for status quo, which will get filtered out.
+                trial = exp.new_trial().add_arm(exp.status_quo).run().mark_completed()
+                exp.attach_data(get_branin_data(trials=[trial], metrics=exp.metrics))
+
+            for with_raw_sq in [False, True]:
+                adapter = TorchAdapter(
+                    experiment=exp,
+                    model=BoTorchGenerator(),
+                    transforms=[Derelativize],
+                    transform_configs={
+                        "Derelativize": {"use_raw_status_quo": with_raw_sq}
+                    },
+                    expand_model_space=False,  # To keep SQ out of design.
+                )
+                if attach_data_for_sq:
+                    # Since SQ is out of design, we shouldn't be using
+                    # model predictions.
+                    with mock.patch.object(adapter, "predict") as mock_predict:
+                        adapter.gen(n=1)
+                    # Check that it wasn't called with SQ features.
+                    # It will be called after gen with generated candidate.
+                    self.assertFalse(
+                        any(
+                            args.args[0] == [none_throws(adapter.status_quo).features]
+                            for args in mock_predict.call_args_list
+                        )
+                    )
+                else:
+                    # If there is no data, SQ is not set and we get an error.
+                    with self.assertRaisesRegex(
+                        DataRequiredError, "was not fit with status quo"
+                    ):
+                        adapter.gen(n=1)

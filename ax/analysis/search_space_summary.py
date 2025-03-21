@@ -5,10 +5,16 @@
 
 # pyre-strict
 
-from ax.analysis.analysis import Analysis, AnalysisCard, AnalysisCardLevel
+from ax.analysis.analysis import (
+    Analysis,
+    AnalysisCard,
+    AnalysisCardCategory,
+    AnalysisCardLevel,
+)
 from ax.core.experiment import Experiment
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 
 
 class SearchSpaceSummary(Analysis):
@@ -31,6 +37,7 @@ class SearchSpaceSummary(Analysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> AnalysisCard:
         if experiment is None:
             raise UserInputError(
@@ -38,7 +45,15 @@ class SearchSpaceSummary(Analysis):
             )
         return self._create_analysis_card(
             title=f"SearchSpaceSummary for `{experiment.name}`",
-            subtitle="High-level summary of the `Parameter`-s in this `Experiment`",
+            subtitle=(
+                "The search space summary provides an overview of all "
+                "parameters, including their names, types, and ranges or "
+                "categories. This holistic view provides quick understanding "
+                "on the parameters being optimized, allowing one to verify "
+                "and adjust the search space configuration for effective "
+                "exploration."
+            ),
             level=AnalysisCardLevel.MID,
             df=experiment.search_space.summary_df,
+            category=AnalysisCardCategory.INFO,
         )

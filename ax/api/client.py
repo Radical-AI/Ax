@@ -11,6 +11,7 @@ from logging import Logger
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from ax.analysis.analysis import (  # Used as a return type
     Analysis,
@@ -20,7 +21,21 @@ from ax.analysis.analysis import (  # Used as a return type
 from ax.analysis.markdown.markdown_analysis import (
     markdown_analysis_card_from_analysis_e,
 )
+from ax.analysis.summary import Summary
 from ax.analysis.utils import choose_analyses
+from ax.api.configs import (
+    ExperimentConfig,
+    GenerationStrategyConfig,
+    OrchestrationConfig,
+    StorageConfig,
+)
+from ax.api.protocols.metric import IMetric
+from ax.api.protocols.runner import IRunner
+from ax.api.types import TOutcome, TParameterization
+from ax.api.utils.generation_strategy_dispatch import choose_generation_strategy
+from ax.api.utils.instantiation.from_config import experiment_from_config
+from ax.api.utils.instantiation.from_string import optimization_config_from_string
+from ax.api.utils.storage import db_settings_from_storage_config
 from ax.core.experiment import Experiment
 from ax.core.metric import Metric
 from ax.core.objective import MultiObjective, Objective, ScalarizedObjective
@@ -36,21 +51,6 @@ from ax.early_stopping.strategies import (
 )
 from ax.exceptions.core import ObjectNotFoundError, UnsupportedError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
-from ax.preview.api.configs import (
-    ExperimentConfig,
-    GenerationStrategyConfig,
-    OrchestrationConfig,
-    StorageConfig,
-)
-from ax.preview.api.protocols.metric import IMetric
-from ax.preview.api.protocols.runner import IRunner
-from ax.preview.api.types import TOutcome, TParameterization
-from ax.preview.api.utils.instantiation.from_config import experiment_from_config
-from ax.preview.api.utils.instantiation.from_string import (
-    optimization_config_from_string,
-)
-from ax.preview.api.utils.storage import db_settings_from_storage_config
-from ax.preview.modelbridge.dispatch_utils import choose_generation_strategy
 from ax.service.scheduler import Scheduler, SchedulerOptions
 from ax.service.utils.best_point_mixin import BestPointMixin
 from ax.service.utils.with_db_settings_base import WithDBSettingsBase
@@ -560,23 +560,16 @@ class Client(WithDBSettingsBase):
             experiment=self._experiment, trial=self._experiment.trials[trial_index]
         )
 
-    def mark_trial_early_stopped(
-        self, trial_index: int, raw_data: TOutcome, progression: int | None = None
-    ) -> None:
+    def mark_trial_early_stopped(self, trial_index: int) -> None:
         """
-        Manually mark a trial as EARLY_STOPPED while attaching the most recent data.
-        This is used when the user has decided (with or without Ax's recommendation) to
-        stop the trial early. EARLY_STOPPED trials will not be re-suggested by
-        get_next_trials.
+        Manually mark a trial as EARLY_STOPPED. This is used when the user has decided
+        (with or without Ax's recommendation) to stop the trial after some data has
+        been attached but before the trial is completed. Note that if data has not been
+        attached for the trial yet users should instead call ``mark_trial_abandoned``.
+        EARLY_STOPPED trials will not be re-suggested by ``get_next_trials``.
 
         Saves to database on completion if storage_config is present.
         """
-
-        # First attach the new data
-        self.attach_data(
-            trial_index=trial_index, raw_data=raw_data, progression=progression
-        )
-
         self._experiment.trials[trial_index].mark_early_stopped()
 
         self._save_or_update_trial_in_db_if_possible(
@@ -668,6 +661,36 @@ class Client(WithDBSettingsBase):
         )
 
         return cards
+
+    def summarize(self) -> pd.DataFrame:
+        """
+        Special convenience method for producing the DataFrame produced by the Summary
+        Analysis. This method is a convenient way to inspect the state of the
+        experiment, but because the shape of the resultant DataFrame can change based
+        on the experiment state both users and Ax developers should prefer to use other
+        methods for extracting information from the experiment to consume downstream.
+
+        The DataFrame computed will contain one row per arm and the following columns
+        (though empty columns are omitted):
+            - trial_index: The trial index of the arm
+            - arm_name: The name of the arm
+            - trial_status: The status of the trial (e.g. RUNNING, SUCCEDED, FAILED)
+            - failure_reason: The reason for the failure, if applicable
+            - generation_node: The name of the ``GenerationNode`` that generated the arm
+            - **METADATA: Any metadata associated with the trial, as specified by the
+                Experiment's runner.run_metadata_report_keys field
+            - **METRIC_NAME: The observed mean of the metric specified, for each metric
+            - **PARAMETER_NAME: The parameter value for the arm, for each parameter
+        """
+
+        return (
+            Summary(omit_empty_columns=True)
+            .compute(
+                experiment=self._experiment,
+                generation_strategy=self._generation_strategy,
+            )
+            .df
+        )
 
     def get_best_parameterization(
         self, use_model_predictions: bool = True

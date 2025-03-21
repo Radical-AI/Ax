@@ -16,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 from ax.benchmark.benchmark import (
+    _get_inference_trace_from_params,
     benchmark_multiple_problems_methods,
     benchmark_one_method_problem,
     benchmark_replication,
@@ -315,10 +316,10 @@ class TestBenchmark(TestCase):
             "Complete out of order": [0, 0, 1, 2],
         }
         expected_pending_in_each_gen = {
-            "All complete at different times": [[], [0], [1], [2]],
-            "Trials complete immediately": [[], [0], [], [2]],
-            "Trials complete at same time": [[], [0], [], [2]],
-            "Complete out of order": [[], [0], [0], [2]],
+            "All complete at different times": [[None], [0], [1], [2]],
+            "Trials complete immediately": [[None], [0], [None], [2]],
+            "Trials complete at same time": [[None], [0], [None], [2]],
+            "Complete out of order": [[None], [0], [0], [2]],
         }
         # When two trials complete at the same time, the inference trace uses
         # data from both to get the best point, and repeats it.
@@ -737,6 +738,10 @@ class TestBenchmark(TestCase):
         )
 
         self.assertTrue(np.all(res.score_trace <= 100))
+        self.assertEqual(len(res.cost_trace), problem.num_trials)
+        self.assertEqual(len(res.inference_trace), problem.num_trials)
+        # since inference trace is not supported for MOO, it should be all NaN
+        self.assertTrue(np.isnan(res.inference_trace).all())
 
     def test_benchmark_one_method_problem(self) -> None:
         problem = get_single_objective_benchmark_problem()
@@ -1059,3 +1064,38 @@ class TestBenchmark(TestCase):
             )
             # (5-0) * (5-0)
             self.assertEqual(result, 25)
+
+    def test_get_inference_trace_from_params(self) -> None:
+        problem = get_single_objective_benchmark_problem()
+        with self.subTest("No params"):
+            n_elements = 4
+            result = _get_inference_trace_from_params(
+                best_params_list=[], problem=problem, n_elements=n_elements
+            )
+            self.assertEqual(len(result), n_elements)
+            self.assertTrue(np.isnan(result).all())
+
+        with self.subTest("Wrong number of params"):
+            n_elements = 4
+            with self.assertRaisesRegex(RuntimeError, "Expected 4 elements"):
+                _get_inference_trace_from_params(
+                    best_params_list=[{"x0": 0.0, "x1": 0.0}],
+                    problem=problem,
+                    n_elements=n_elements,
+                )
+
+        with self.subTest("Correct number of params"):
+            n_elements = 2
+            best_params_list = [{"x0": 0.0, "x1": 0.0}, {"x0": 1.0, "x1": 1.0}]
+            result = _get_inference_trace_from_params(
+                best_params_list=best_params_list,
+                problem=problem,
+                n_elements=n_elements,
+            )
+            self.assertEqual(len(result), n_elements)
+            self.assertFalse(np.isnan(result).any())
+            expected_trace = [
+                problem.test_function.evaluate_true(params=params).item()
+                for params in best_params_list
+            ]
+            self.assertEqual(result.tolist(), expected_trace)

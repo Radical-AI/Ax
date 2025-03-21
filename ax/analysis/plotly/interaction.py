@@ -10,7 +10,7 @@ from logging import Logger
 
 import pandas as pd
 import torch
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.plotly.plotly_analysis import PlotlyAnalysis, PlotlyAnalysisCard
 
@@ -27,6 +27,7 @@ from ax.analysis.plotly.utils import select_metric
 from ax.core.experiment import Experiment
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from ax.modelbridge.registry import Generators
 from ax.modelbridge.torch import TorchAdapter
 from ax.models.torch.botorch_modular.surrogate import Surrogate
@@ -90,6 +91,7 @@ class InteractionPlot(PlotlyAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> PlotlyAnalysisCard:
         """
         Compute Sobol index sensitivity for one metric of an experiment. Sensitivity
@@ -245,20 +247,30 @@ class InteractionPlot(PlotlyAnalysis):
             width=1000,
         )
 
-        subtitle_substring = (
-            "one- or two-dimensional" if self.fit_interactions else "one-dimensional"
+        params_substring = (
+            "both parameters and parameter interactions"
+            if self.fit_interactions
+            else "different parameters"
+        )
+        addtional_substring = (
+            " (or parameter interactions)" if self.fit_interactions else ""
+        )
+        subtitle = (
+            "The interaction plot shows the ranked importance of "
+            f"{params_substring} for moving a specified metric. The parameters"
+            f"{addtional_substring} with the most significant impact on predicted "
+            "metric outcomes are visualized through slice or contour plots, "
+            "providing deeper understanding into the underlying dynamics driving "
+            "the experiment's results."
         )
 
         return self._create_plotly_analysis_card(
             title=f"Interaction Analysis for {metric_name}",
-            subtitle=(
-                f"Understand an Experiment's data as {subtitle_substring} additive "
-                "components with sparsity. Important components are visualized through "
-                "slice or contour plots"
-            ),
+            subtitle=subtitle,
             level=AnalysisCardLevel.MID,
             df=sensitivity_df,
             fig=fig,
+            category=AnalysisCardCategory.INSIGHT,
         )
 
     def _get_oak_model(self, experiment: Experiment, metric_name: str) -> TorchAdapter:
@@ -333,6 +345,7 @@ def _prepare_surface_plot(
             log_y=is_axis_log_scale(
                 parameter=experiment.search_space.parameters[y_parameter_name]
             ),
+            display_sampled=True,
         )
 
     # If the feature is a first-order component, plot a slice plot.
@@ -350,4 +363,5 @@ def _prepare_surface_plot(
         log_x=is_axis_log_scale(
             parameter=experiment.search_space.parameters[feature_name]
         ),
+        display_sampled=True,
     )

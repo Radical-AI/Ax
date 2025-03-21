@@ -5,10 +5,14 @@
 
 # pyre-strict
 
-from ax.analysis.analysis import AnalysisCardLevel
-from ax.analysis.plotly.cross_validation import CrossValidationPlot
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
+from ax.analysis.plotly.cross_validation import (
+    cross_validation_adhoc_compute,
+    CrossValidationPlot,
+)
 from ax.core.trial import Trial
 from ax.exceptions.core import UserInputError
+from ax.modelbridge.registry import Generators
 from ax.service.ax_client import AxClient, ObjectiveProperties
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.mock import mock_botorch_optimize
@@ -54,12 +58,27 @@ class TestCrossValidationPlot(TestCase):
         self.assertEqual(card.title, "Cross Validation for bar")
         self.assertEqual(
             card.subtitle,
-            "Out-of-sample predictions using leave-one-out CV",
+            (
+                "The cross-validation plot displays the model fit for each "
+                "metric in the experiment. It employs a leave-one-out "
+                "approach, where the model is trained on all data except one "
+                "sample, which is used for validation. The plot shows the "
+                "predicted outcome for the validation set on the y-axis against "
+                "its actual value on the x-axis. Points that align closely with "
+                "the dotted diagonal line indicate a strong model fit, signifying "
+                "accurate predictions. Additionally, the plot includes 95% "
+                "confidence intervals that provide insight into the noise in "
+                "observations and the uncertainty in model predictions. A "
+                "horizontal, flat line of predictions indicates that the model "
+                "has not picked up on sufficient signal in the data, and instead "
+                "is just predicting the mean."
+            ),
         )
         self.assertEqual(card.level, AnalysisCardLevel.LOW)
+        self.assertEqual(card.category, AnalysisCardCategory.INSIGHT)
         self.assertEqual(
             {*card.df.columns},
-            {"arm_name", "observed", "observed_sem", "predicted", "predicted_sem"},
+            {"arm_name", "observed", "observed_95_ci", "predicted", "predicted_95_ci"},
         )
         self.assertIsNotNone(card.blob)
         self.assertEqual(card.blob_annotation, "plotly")
@@ -76,13 +95,20 @@ class TestCrossValidationPlot(TestCase):
                 card.df["arm_name"].unique(),
             )
 
-    def test_it_can_only_contain_observation_prior_to_the_trial_index(self) -> None:
-        analysis = CrossValidationPlot(metric_name="bar", trial_index=7)
-        with self.assertRaisesRegex(
-            UserInputError,
-            "CrossValidationPlot was specified to be for the generation of trial 7",
-        ):
-            analysis.compute(generation_strategy=self.client.generation_strategy)
+    def test_raises_if_no_metric_name_and_no_exp(self) -> None:
+        analysis = CrossValidationPlot()
+        with self.subTest("raises if no metric name and no experiment"):
+            with self.assertRaisesRegex(
+                UserInputError, "attempting to infer metric name"
+            ):
+                analysis.compute(generation_strategy=self.client.generation_strategy)
+        with self.subTest("infer from experiment"):
+            card = analysis.compute(
+                generation_strategy=self.client.generation_strategy,
+                experiment=self.client.experiment,
+            )
+            # validates that metric name was successfully inferred from exp
+            self.assertEqual(card.title, "Cross Validation for bar")
 
     def test_it_can_specify_trial_index_correctly(self) -> None:
         analysis = CrossValidationPlot(metric_name="bar", trial_index=9)
@@ -97,3 +123,19 @@ class TestCrossValidationPlot(TestCase):
                 arm_name,
                 card.df["arm_name"].unique(),
             )
+
+    @mock_botorch_optimize
+    def test_compute_adhoc(self) -> None:
+        metric_mapping = {"bar": "spunky"}
+        data = self.client.experiment.lookup_data()
+        adapter = Generators.BOTORCH_MODULAR(
+            experiment=self.client.experiment, data=data
+        )
+        analysis = cross_validation_adhoc_compute(
+            adapter=adapter, data=data, metric_name_mapping=metric_mapping
+        )
+        self.assertEqual(len(analysis), 1)
+        card = analysis[0]
+        self.assertEqual(card.name, "CrossValidationPlot")
+        # validate that the metric name replacement occured
+        self.assertEqual(card.title, "Cross Validation for spunky")

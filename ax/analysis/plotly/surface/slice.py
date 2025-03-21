@@ -8,7 +8,7 @@
 import math
 
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.plotly.plotly_analysis import PlotlyAnalysis, PlotlyAnalysisCard
 from ax.analysis.plotly.surface.utils import (
@@ -36,26 +36,32 @@ class SlicePlot(PlotlyAnalysis):
         - PARAMETER_NAME: The value of the parameter specified
         - METRIC_NAME_mean: The predected mean of the metric specified
         - METRIC_NAME_sem: The predected sem of the metric specified
+        - sampled: Whether the parameter value was sampled in at least one trial
     """
 
     def __init__(
         self,
         parameter_name: str,
         metric_name: str | None = None,
+        display_sampled: bool = True,
     ) -> None:
         """
         Args:
             parameter_name: The name of the parameter to plot on the x axis.
             metric_name: The name of the metric to plot on the y axis. If not
                 specified the objective will be used.
+            display_sampled: If True, plot "x"s at x coordinates which have been
+                sampled in at least one trial.
         """
         self.parameter_name = parameter_name
         self.metric_name = metric_name
+        self._display_sampled = display_sampled
 
     def compute(
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> PlotlyAnalysisCard:
         if experiment is None:
             raise UserInputError("SlicePlot requires an Experiment")
@@ -64,7 +70,7 @@ class SlicePlot(PlotlyAnalysis):
             raise UserInputError("SlicePlot requires a GenerationStrategy")
 
         if generation_strategy.model is None:
-            generation_strategy._fit_current_model(None)
+            generation_strategy._curr._fit(experiment=experiment)
 
         metric_name = self.metric_name or select_metric(experiment=experiment)
 
@@ -82,17 +88,24 @@ class SlicePlot(PlotlyAnalysis):
             log_x=is_axis_log_scale(
                 parameter=experiment.search_space.parameters[self.parameter_name]
             ),
+            display_sampled=self._display_sampled,
         )
 
         return self._create_plotly_analysis_card(
             title=f"{self.parameter_name} vs. {metric_name}",
             subtitle=(
-                "1D slice of the surrogate model's predicted outcomes for "
-                f"{metric_name}"
+                "The slice plot provides a one-dimensional view of predicted "
+                f"outcomes for {metric_name} as a function of a single parameter, "
+                "while keeping all other parameters fixed at their status_quo "
+                "value (or mean value if status_quo is unavailable). "
+                "This visualization helps in understanding the sensitivity and "
+                "impact of changes in the selected parameter on the predicted "
+                "metric outcomes."
             ),
             level=AnalysisCardLevel.LOW,
             df=df,
             fig=fig,
+            category=AnalysisCardCategory.INSIGHT,
         )
 
 
@@ -102,10 +115,16 @@ def _prepare_data(
     parameter_name: str,
     metric_name: str,
 ) -> pd.DataFrame:
+    sampled_xs = [
+        arm.parameters[parameter_name]
+        for trial in experiment.trials.values()
+        for arm in trial.arms
+    ]
     # Choose which parameter values to predict points for.
-    xs = get_parameter_values(
+    unsampled_xs = get_parameter_values(
         parameter=experiment.search_space.parameters[parameter_name]
     )
+    xs = [*sampled_xs, *unsampled_xs]
 
     # Construct observation features for each parameter value previously chosen by
     # fixing all other parameters to their status-quo value or mean.
@@ -125,16 +144,19 @@ def _prepare_data(
 
     predictions = model.predict(observation_features=features)
 
-    return pd.DataFrame.from_records(
-        [
-            {
-                parameter_name: xs[i],
-                f"{metric_name}_mean": predictions[0][metric_name][i],
-                f"{metric_name}_sem": predictions[1][metric_name][metric_name][i]
-                ** 0.5,  # Convert the variance to the SEM
-            }
-            for i in range(len(xs))
-        ]
+    return none_throws(
+        pd.DataFrame.from_records(
+            [
+                {
+                    parameter_name: xs[i],
+                    f"{metric_name}_mean": predictions[0][metric_name][i],
+                    f"{metric_name}_sem": predictions[1][metric_name][metric_name][i]
+                    ** 0.5,  # Convert the variance to the SEM
+                    "sampled": xs[i] in sampled_xs,
+                }
+                for i in range(len(xs))
+            ]
+        ).drop_duplicates()
     ).sort_values(by=parameter_name)
 
 
@@ -142,10 +164,12 @@ def _prepare_plot(
     df: pd.DataFrame,
     parameter_name: str,
     metric_name: str,
-    log_x: bool = False,
+    log_x: bool,
+    display_sampled: bool,
 ) -> go.Figure:
     x = df[parameter_name].tolist()
     y = df[f"{metric_name}_mean"].tolist()
+
     # Convert the SEMs to 95% confidence intervals
     y_upper = (df[f"{metric_name}_mean"] + 1.96 * df[f"{metric_name}_sem"]).tolist()
     y_lower = (df[f"{metric_name}_mean"] - 1.96 * df[f"{metric_name}_sem"]).tolist()
@@ -181,6 +205,25 @@ def _prepare_plot(
             yaxis_title=metric_name,
         ),
     )
+
+    if display_sampled:
+        sampled = df[df["sampled"]]
+        x_sampled = sampled[parameter_name].tolist()
+        y_sampled = sampled[f"{metric_name}_mean"].tolist()
+
+        samples = go.Scatter(
+            x=x_sampled,
+            y=y_sampled,
+            mode="markers",
+            marker={
+                "symbol": "x",
+                "color": "black",
+            },
+            name=f"Sampled {parameter_name}",
+            showlegend=False,
+        )
+
+        fig.add_trace(samples)
 
     # Set the x-axis scale to log if relevant
     if log_x:

@@ -16,6 +16,7 @@ from typing import Any, Protocol
 import pandas as pd
 from ax.core.experiment import Experiment
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from ax.utils.common.base import Base
 from ax.utils.common.logger import get_logger
 from ax.utils.common.result import Err, ExceptionE, Ok, Result
@@ -32,6 +33,14 @@ class AnalysisCardLevel(IntEnum):
     CRITICAL = 40
 
 
+class AnalysisCardCategory(IntEnum):
+    ERROR = 0
+    ACTIONABLE = 1
+    INSIGHT = 2
+    DIAGNOSTIC = 3  # Equivalent to "health check" in online setting
+    INFO = 4
+
+
 class AnalysisCard(Base):
     # Name of the analysis computed, usually the class name of the Analysis which
     # produced the card. Useful for grouping by when querying a large collection of
@@ -44,6 +53,8 @@ class AnalysisCard(Base):
     title: str
     subtitle: str
 
+    # Level of the card with respect to its importance. Higher levels are more
+    # important, and will be displayed first.
     level: int
 
     df: pd.DataFrame  # Raw data produced by the Analysis
@@ -53,6 +64,9 @@ class AnalysisCard(Base):
     # the blob and presenting it to the user (ex. PlotlyAnalysisCard.get_figure()
     # decodes the blob into a go.Figure object).
     blob: str
+    # Type of the card (ex: "insight", "diagnostic"), useful for
+    # grouping the cards to display only one category in notebook environments.
+    category: int
     # How to interpret the blob (ex. "dataframe", "plotly", "markdown")
     blob_annotation = "dataframe"
 
@@ -64,6 +78,7 @@ class AnalysisCard(Base):
         level: int,
         df: pd.DataFrame,
         blob: str,
+        category: int,
         attributes: dict[str, Any] | None = None,
     ) -> None:
         self.name = name
@@ -73,6 +88,7 @@ class AnalysisCard(Base):
         self.df = df
         self.blob = blob
         self.attributes = {} if attributes is None else attributes
+        self.category = category
 
     def _ipython_display_(self) -> None:
         """
@@ -82,8 +98,15 @@ class AnalysisCard(Base):
 
         By default, this method displays the raw data in a pandas DataFrame.
         """
-        display(Markdown(f"## {self.title}\n\n### {self.subtitle}"))
+        self._display_header()
         display(self.df)
+
+    def _display_header(self) -> None:
+        """
+        Display the title and subtitle of the AnalysisCard. Used in _ipython_display_
+        across all subclasses of AnalysisCard to ensure a uniform look and feel.
+        """
+        display(Markdown(f"**{self.title}**\n\n{self.subtitle}"))
 
 
 def display_cards(
@@ -124,6 +147,7 @@ class Analysis(Protocol):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> AnalysisCard:
         # Note: when implementing compute always prefer experiment.lookup_data() to
         # experiment.fetch_data() to avoid unintential data fetching within the report
@@ -162,6 +186,7 @@ class Analysis(Protocol):
         subtitle: str,
         level: int,
         df: pd.DataFrame,
+        category: int,
     ) -> AnalysisCard:
         """
         Make an AnalysisCard from this Analysis using provided fields and
@@ -175,6 +200,7 @@ class Analysis(Protocol):
             level=level,
             df=df,
             blob=df.to_json(),
+            category=category,
         )
 
     @property

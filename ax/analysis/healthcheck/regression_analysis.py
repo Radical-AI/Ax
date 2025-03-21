@@ -8,7 +8,7 @@
 import json
 
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.healthcheck.healthcheck_analysis import (
     HealthcheckAnalysis,
     HealthcheckAnalysisCard,
@@ -20,6 +20,7 @@ from ax.analysis.healthcheck.regression_detection_utils import (
 from ax.core.experiment import Experiment
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from pyre_extensions import none_throws
 
 
@@ -41,7 +42,6 @@ class RegressionAnalysis(HealthcheckAnalysis):
                 Regressions are defined as the arms that have a probability of
                 regression above this threshold.
 
-        Returns None
         """
         self.prob_threshold = prob_threshold
 
@@ -49,6 +49,7 @@ class RegressionAnalysis(HealthcheckAnalysis):
         self,
         experiment: Experiment | None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> HealthcheckAnalysisCard:
         r"""
         Detect the regressing arms for all trials that have data.
@@ -56,6 +57,7 @@ class RegressionAnalysis(HealthcheckAnalysis):
         Args:
             experiment: Ax experiment.
             generation_strategy: Ax generation strategy.
+            adapter: Ax modelbridge adapter
 
         Returns:
             A HealthcheckAnalysisCard object with the information on regressing arms
@@ -83,19 +85,29 @@ class RegressionAnalysis(HealthcheckAnalysis):
             regressions_by_trial=regressions_by_trial
         )
 
+        subtitle_base = (
+            "The regression analysis health check detects arms "
+            "across all trials that are regressing metrics. While metric "
+            "regressions can happen (especially in exploratory rounds that use "
+            "randomized parameters), users may choose to stop arms that are "
+            "regressing company-critical metrics.\n\n"
+        )
+
         if regressions_by_trial_df.shape[0] > 0:
             df = regressions_by_trial_df
             status = HealthcheckStatus.WARNING
             df["status"] = status
-            subtitle = (
-                "The following arms are regressing the following metrics "
-                f"for the respective trials: \n {regressions_msg}"
+            subtitle = subtitle_base + (
+                "The following arms are regressing the "
+                "following metrics for the respective trials: \n"
+                f"{regressions_msg}"
             )
+
             title_status = "Warning"
         else:
             status = HealthcheckStatus.PASS
             df = pd.DataFrame({"status": [status]})
-            subtitle = "No metric regessions detected."
+            subtitle = subtitle_base + "No metric regessions detected."
             title_status = "Success"
 
         return HealthcheckAnalysisCard(
@@ -105,6 +117,7 @@ class RegressionAnalysis(HealthcheckAnalysis):
             subtitle=subtitle,
             df=df,
             level=AnalysisCardLevel.LOW,
+            category=AnalysisCardCategory.DIAGNOSTIC,
         )
 
 

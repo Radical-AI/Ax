@@ -6,6 +6,7 @@
 
 # pyre-strict
 
+from collections.abc import Mapping, Sequence
 from logging import Logger
 
 import torch
@@ -13,6 +14,7 @@ from ax.core.data import Data
 from ax.core.experiment import Experiment
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.search_space import SearchSpace
+from ax.modelbridge.base import DataLoaderConfig
 from ax.modelbridge.discrete import DiscreteAdapter
 from ax.modelbridge.random import RandomAdapter
 from ax.modelbridge.registry import Cont_X_trans, Generators, Y_trans
@@ -73,7 +75,7 @@ def get_sobol(
     """
     return assert_is_instance(
         Generators.SOBOL(
-            search_space=search_space,
+            experiment=Experiment(search_space=search_space),
             seed=seed,
             deduplicate=deduplicate,
             init_position=init_position,
@@ -98,7 +100,9 @@ def get_uniform(
     """
     return assert_is_instance(
         Generators.UNIFORM(
-            search_space=search_space, seed=seed, deduplicate=deduplicate
+            experiment=Experiment(search_space=search_space),
+            seed=seed,
+            deduplicate=deduplicate,
         ),
         RandomAdapter,
     )
@@ -109,8 +113,8 @@ def get_botorch(
     data: Data,
     search_space: SearchSpace | None = None,
     device: torch.device = DEFAULT_TORCH_DEVICE,
-    transforms: list[type[Transform]] = Cont_X_trans + Y_trans,
-    transform_configs: dict[str, TConfig] | None = None,
+    transforms: Sequence[type[Transform]] = Cont_X_trans + Y_trans,
+    transform_configs: Mapping[str, TConfig] | None = None,
     model_constructor: TModelConstructor = get_and_fit_model,
     model_predictor: TModelPredictor = predict_from_model,
     acqf_constructor: TAcqfConstructor = get_qLogNEI,
@@ -143,7 +147,10 @@ def get_botorch(
 def get_factorial(search_space: SearchSpace) -> DiscreteAdapter:
     """Instantiates a factorial generator."""
     return assert_is_instance(
-        Generators.FACTORIAL(search_space=search_space, fit_out_of_design=True),
+        Generators.FACTORIAL(
+            search_space=search_space,
+            data_loader_config=DataLoaderConfig(fit_out_of_design=True),
+        ),
         DiscreteAdapter,
     )
 
@@ -167,7 +174,7 @@ def get_empirical_bayes_thompson(
             num_samples=num_samples,
             min_weight=min_weight,
             uniform_weights=uniform_weights,
-            fit_out_of_design=True,
+            data_loader_config=DataLoaderConfig(fit_out_of_design=True),
         ),
         DiscreteAdapter,
     )
@@ -192,7 +199,7 @@ def get_thompson(
             num_samples=num_samples,
             min_weight=min_weight,
             uniform_weights=uniform_weights,
-            fit_out_of_design=True,
+            data_loader_config=DataLoaderConfig(fit_out_of_design=True),
         ),
         DiscreteAdapter,
     )

@@ -28,7 +28,7 @@ from ax.core.types import TCandidateMetadata, TParameterization
 from ax.utils.common.base import Base
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
-from pyre_extensions import assert_is_instance, none_throws
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -263,7 +263,6 @@ def _observations_from_dataframe(
     map_keys: Iterable[str],
     statuses_to_include: set[TrialStatus],
     statuses_to_include_map_metric: set[TrialStatus],
-    map_keys_as_parameters: bool = False,
 ) -> list[Observation]:
     """Helper method for extracting observations grouped by `cols` from `df`.
 
@@ -278,8 +277,6 @@ def _observations_from_dataframe(
             with statuses in this set.
         statuses_to_include_map_metric: data from MapMetrics will only be included for
             trials with statuses in this set.
-        map_keys_as_parameters: Whether map_keys should be returned as part of
-            the parameters of the Observation objects.
 
     Returns:
         List of Observation objects.
@@ -337,10 +334,7 @@ def _observations_from_dataframe(
             obs_parameters.update(json.loads(fidelities))
 
         for map_key in map_keys:
-            if map_key in obs_parameters or map_keys_as_parameters:
-                obs_parameters[map_key] = features[map_key]
-            else:
-                obs_kwargs[Keys.METADATA][map_key] = features[map_key]
+            obs_kwargs[Keys.METADATA][map_key] = features[map_key]
         d = _filter_data_on_status(
             df=d,
             experiment=experiment,
@@ -426,23 +420,19 @@ def _filter_data_on_status(
     return df
 
 
-def get_feature_cols(data: Data, is_map_data: bool = False) -> list[str]:
+def get_feature_cols(data: Data) -> list[str]:
     """Get the columns used to identify and group observations from a Data object.
 
     Args:
         data: the Data object from which to extract the feature columns.
-        is_map_data: If True, the Data object's map_keys will be included.
+            If the Data object is an instance of MapData, the map_keys will be
+            included in the feature columns.
 
     Returns:
         A list of column names to be used to group observations.
     """
     feature_cols = OBS_COLS.intersection(data.df.columns)
-    # note we use this check, rather than isinstance, since
-    # only some Adapters (e.g. MapTorchAdapter)
-    # use observations_from_data, which is required
-    # to properly handle MapData features (e.g. fidelity).
-    if is_map_data:
-        data = assert_is_instance(data, MapData)
+    if isinstance(data, MapData):
         feature_cols = feature_cols.union(data.map_keys)
 
     for column in TIME_COLS:
@@ -464,11 +454,9 @@ def observations_from_data(
     data: Data,
     statuses_to_include: set[TrialStatus] | None = None,
     statuses_to_include_map_metric: set[TrialStatus] | None = None,
-    map_keys_as_parameters: bool = False,
     latest_rows_per_group: int | None = None,
     limit_rows_per_metric: int | None = None,
     limit_rows_per_group: int | None = None,
-    load_only_completed_map_metrics: bool = True,
 ) -> list[Observation]:
     """Convert Data (or MapData) to observations.
 
@@ -485,8 +473,6 @@ def observations_from_data(
             with statuses in this set. Defaults to all statuses except abandoned.
         statuses_to_include_map_metric: data from MapMetrics will only be included for
             trials with statuses in this set. Defaults to all statuses except abandoned.
-        map_keys_as_parameters: Whether map_keys should be returned as part of
-            the parameters of the Observation objects.
         latest_rows_per_group: If specified and data is an instance of MapData,
             uses MapData.latest() with `rows_per_group=latest_rows_per_group` to
             retrieve the most recent rows for each group. Useful in cases where
@@ -502,8 +488,6 @@ def observations_from_data(
             uses MapData.subsample() with `limit_rows_per_group` on the first
             map_key (map_data.map_keys[0]) to subsample the MapData. Ignored if
             `latest_rows_per_group` is specified.
-        load_only_completed_map_metrics: If True, only loads the last observation
-            for each completed MapMetric.
 
     Returns:
         List of Observation objects.
@@ -512,12 +496,8 @@ def observations_from_data(
         statuses_to_include = NON_ABANDONED_STATUSES
     if statuses_to_include_map_metric is None:
         statuses_to_include_map_metric = NON_ABANDONED_STATUSES
-    is_map_data = isinstance(data, MapData)
-    map_keys = []
-    take_map_branch = is_map_data and not load_only_completed_map_metrics
-    if take_map_branch:
-        data = assert_is_instance(data, MapData)
-        map_keys.extend(data.map_keys)
+    if isinstance(data, MapData):
+        map_keys = data.map_keys
         if latest_rows_per_group is not None:
             data = data.latest(map_keys=map_keys, rows_per_group=latest_rows_per_group)
         elif limit_rows_per_metric is not None or limit_rows_per_group is not None:
@@ -529,16 +509,15 @@ def observations_from_data(
             )
         df = data.map_df
     else:
+        map_keys = []
         df = data.df
-    feature_cols = get_feature_cols(data, is_map_data=take_map_branch)
     return _observations_from_dataframe(
         experiment=experiment,
         df=df,
-        cols=feature_cols,
+        cols=get_feature_cols(data=data),
         map_keys=map_keys,
         statuses_to_include=statuses_to_include,
         statuses_to_include_map_metric=statuses_to_include_map_metric,
-        map_keys_as_parameters=map_keys_as_parameters,
     )
 
 

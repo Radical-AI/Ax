@@ -12,6 +12,19 @@ import numpy as np
 
 import pandas as pd
 from ax.analysis.plotly.parallel_coordinates import ParallelCoordinatesPlot
+from ax.api.client import Client
+from ax.api.configs import (
+    ChoiceParameterConfig,
+    ExperimentConfig,
+    GenerationStrategyConfig,
+    OrchestrationConfig,
+    ParameterType,
+    RangeParameterConfig,
+    StorageConfig,
+)
+from ax.api.protocols.metric import IMetric
+from ax.api.protocols.runner import IRunner
+from ax.api.types import TParameterization
 
 from ax.core.experiment import Experiment
 from ax.core.formatting_utils import DataType
@@ -31,19 +44,6 @@ from ax.core.trial import Trial
 from ax.core.trial_status import TrialStatus
 from ax.early_stopping.strategies import PercentileEarlyStoppingStrategy
 from ax.exceptions.core import UnsupportedError
-from ax.preview.api.client import Client
-from ax.preview.api.configs import (
-    ChoiceParameterConfig,
-    ExperimentConfig,
-    GenerationStrategyConfig,
-    OrchestrationConfig,
-    ParameterType,
-    RangeParameterConfig,
-    StorageConfig,
-)
-from ax.preview.api.protocols.metric import IMetric
-from ax.preview.api.protocols.runner import IRunner
-from ax.preview.api.types import TParameterization
 from ax.storage.sqa_store.db import init_test_engine_and_session_factory
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import (
@@ -687,9 +687,16 @@ class TestClient(TestCase):
         client.configure_optimization(objective="foo")
 
         trial_index = [*client.get_next_trials(maximum_trials=1).keys()][0]
-        client.mark_trial_early_stopped(
+
+        with self.assertRaisesRegex(
+            UnsupportedError, "Cannot mark trial early stopped"
+        ):
+            client.mark_trial_early_stopped(trial_index=trial_index)
+
+        client.attach_data(
             trial_index=trial_index, raw_data={"foo": 0.0}, progression=1
         )
+        client.mark_trial_early_stopped(trial_index=trial_index)
         self.assertEqual(
             client._experiment.trials[trial_index].status,
             TrialStatus.EARLY_STOPPED,
@@ -826,6 +833,75 @@ class TestClient(TestCase):
             len(client._experiment.trials_by_status[TrialStatus.COMPLETED]),
             5,
         )
+
+    def test_summarize(self) -> None:
+        client = Client()
+
+        client.configure_experiment(
+            experiment_config=ExperimentConfig(
+                name="test_experiment",
+                parameters=[
+                    RangeParameterConfig(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        bounds=(0, 1),
+                    ),
+                    RangeParameterConfig(
+                        name="x2",
+                        parameter_type=ParameterType.FLOAT,
+                        bounds=(0, 1),
+                    ),
+                ],
+            )
+        )
+        client.configure_optimization(objective="foo, bar")
+
+        # Get two trials and fail one, giving us a ragged structure
+        client.get_next_trials(maximum_trials=2)
+        client.complete_trial(trial_index=0, raw_data={"foo": 1.0, "bar": 2.0})
+        client.mark_trial_failed(trial_index=1)
+
+        summary_df = client.summarize()
+
+        self.assertEqual(
+            {*summary_df.columns},
+            {
+                "trial_index",
+                "arm_name",
+                "trial_status",
+                "generation_node",
+                "foo",
+                "bar",
+                "x1",
+                "x2",
+            },
+        )
+
+        trial_0_parameters = none_throws(
+            assert_is_instance(client._experiment.trials[0], Trial).arm
+        ).parameters
+        trial_1_parameters = none_throws(
+            assert_is_instance(client._experiment.trials[1], Trial).arm
+        ).parameters
+        expected = pd.DataFrame(
+            {
+                "trial_index": {0: 0, 1: 1},
+                "arm_name": {0: "0_0", 1: "1_0"},
+                "trial_status": {0: "COMPLETED", 1: "FAILED"},
+                "generation_node": {0: "Sobol", 1: "Sobol"},
+                "foo": {0: 1.0, 1: np.nan},  # NaN because trial 1 failed
+                "bar": {0: 2.0, 1: np.nan},
+                "x1": {
+                    0: trial_0_parameters["x1"],
+                    1: trial_1_parameters["x1"],
+                },
+                "x2": {
+                    0: trial_0_parameters["x2"],
+                    1: trial_1_parameters["x2"],
+                },
+            }
+        )
+        pd.testing.assert_frame_equal(summary_df, expected)
 
     def test_compute_analyses(self) -> None:
         client = Client()

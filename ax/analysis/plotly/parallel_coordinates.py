@@ -9,13 +9,14 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.plotly.plotly_analysis import PlotlyAnalysis, PlotlyAnalysisCard
 from ax.analysis.plotly.utils import select_metric
 from ax.core.experiment import Experiment
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from plotly import graph_objects as go
 
 
@@ -46,6 +47,7 @@ class ParallelCoordinatesPlot(PlotlyAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> PlotlyAnalysisCard:
         if experiment is None:
             raise UserInputError("ParallelCoordinatesPlot requires an Experiment")
@@ -57,10 +59,21 @@ class ParallelCoordinatesPlot(PlotlyAnalysis):
 
         return self._create_plotly_analysis_card(
             title=f"Parallel Coordinates for {metric_name}",
-            subtitle="View arm parameterizations with their respective metric values",
+            subtitle=(
+                "The parallel coordinates plot displays multi-dimensional "
+                "data by representing each parameter as a parallel axis. This "
+                "plot helps in assessing how thoroughly the search space has "
+                "been explored and in identifying patterns or clusterings associated "
+                "with high-performing (good) or low-performing (bad) arms. By "
+                "tracing lines across the axes, one can observe correlations and "
+                "interactions between parameters, gaining insights into the "
+                "relationships that contribute to the success or failure of "
+                "different configurations within the experiment."
+            ),
             level=AnalysisCardLevel.HIGH,
             df=df,
             fig=fig,
+            category=AnalysisCardCategory.INSIGHT,
         )
 
 
@@ -79,6 +92,7 @@ def _prepare_data(experiment: Experiment, metric: str) -> pd.DataFrame:
         }
         for trial in experiment.trials.values()
         for arm in trial.arms
+        if trial.status.is_completed  # Only include completed trials
     ]
 
     return pd.DataFrame.from_records(records).dropna()

@@ -11,14 +11,23 @@ from ax.core.experiment import Experiment
 from ax.core.objective import MultiObjective, ScalarizedObjective
 from ax.core.outcome_constraint import ComparisonOp, OutcomeConstraint
 from ax.exceptions.core import UnsupportedError, UserInputError
+from ax.generation_strategy.generation_strategy import GenerationStrategy
 from ax.modelbridge.base import Adapter
+
 from botorch.utils.probability.utils import compute_log_prob_feas_from_bounds
 from numpy.typing import NDArray
+from pyre_extensions import none_throws
 
 # Because normal distributions have long tails, every arm has a non-zero
 # probability of violating the constraint. But below a certain threshold, we
 # consider probability of violation to be negligible.
 MINIMUM_CONTRAINT_VIOLATION_THRESHOLD = 0.01
+
+# Plotting style constants
+CONFIDENCE_INTERVAL_BLUE = "rgba(0, 0, 255, 0.2)"
+MARKER_BLUE = "rgba(0, 0, 255, 0.3)"  # slightly more opaque than the CI blue
+CANDIDATE_RED = "rgba(220, 20, 60, 0.3)"
+CANDIDATE_CI_RED = "rgba(220, 20, 60, 0.2)"
 
 
 def get_constraint_violated_probabilities(
@@ -126,14 +135,91 @@ def format_constraint_violated_probabilities(
     return constraints_violated_str
 
 
-def is_predictive(model: Adapter) -> bool:
-    """Check if a model is predictive.  Basically, we're checking if
+def get_nudge_value(
+    metric_name: str,
+    experiment: Experiment | None = None,
+    use_modeled_effects: bool = False,
+) -> int:
+    """Get the amount to nudge the level of the plot. Deteremined by metric
+    importance and whether modeled effects are used.
+    """
+    # without an experiment or optimization config, we can't tell if this plot is
+    # relatively more important
+    if experiment is None or experiment.optimization_config is None:
+        return 0
+
+    nudge = 0
+    # More important metrics have a higher nudge
+    if metric_name in experiment.optimization_config.objective.metric_names:
+        nudge += 2
+    elif metric_name in experiment.optimization_config.metrics:
+        nudge += 1
+
+    # Relevant for plots where observed effects and modeled effects can both be shown
+    if use_modeled_effects:
+        nudge += 1
+
+    return nudge
+
+
+def get_adapter(
+    analysis_name: str,
+    experiment: Experiment | None = None,
+    generation_strategy: GenerationStrategy | None = None,
+    adapter: Adapter | None = None,
+    enforce_supports_predictions: bool = False,
+) -> Adapter:
+    """
+    Select the appropriate adapter for the analysis being performed.
+
+    Args:
+        analysis_name: The name of the analysis card for error logging
+        experiment: The experiment associated with this analysis
+        generation_strategy: The generation strategy associated with this analysis
+        adapter: A custom adapter that can be passed in during adhoc computation. This
+            will always take precedence.
+    """
+    # If adapter is provided, it will take precedence, otherwise use the current
+    # adapter from the generation strategy
+    if adapter is None:
+        if generation_strategy is None:
+            raise UserInputError(
+                f"{analysis_name} requires a GenerationStrategy if no custom "
+                "adapter is provided."
+            )
+
+        # If model is not fit already, fit it
+        if generation_strategy.model is None:
+            if experiment is None:
+                raise UserInputError(
+                    "Unable to find a model on the GenerationStrategy,"
+                    " so Experiment must be provided to fit the model"
+                    f" to compute {analysis_name}."
+                )
+            generation_strategy._curr._fit(experiment=experiment)
+        adapter = none_throws(generation_strategy.model)  # model should be fit now
+
+    # if the adapter requested must support predictions, but does not, raise an error
+    if enforce_supports_predictions and not is_predictive(adapter=adapter):
+        raise UserInputError(
+            f"{analysis_name} requires a GenerationStrategy which is "
+            "in a state where the current model supports prediction. "
+            f"The current model is {adapter._model_key} and does not support "
+            "prediction."
+        )
+
+    return adapter
+
+
+def is_predictive(adapter: Adapter) -> bool:
+    # TODO: Improve this logic and move it to base adapter class
+    """Check if a adapter is predictive.  Basically, we're checking if
     predict() is implemented.
 
     NOTE: This does not mean it's capable of out of sample prediction.
     """
     try:
-        model.predict(observation_features=[])
+        adapter.predict(observation_features=[])
     except NotImplementedError:
         return False
     except Exception:

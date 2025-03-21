@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 import torch
 
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.plotly.arm_effects.predicted_effects import PredictedEffectsPlot
 from ax.analysis.plotly.arm_effects.utils import get_predictions_by_arm
 from ax.core.observation import ObservationFeatures
 from ax.core.trial import Trial
 from ax.exceptions.core import UserInputError
-from ax.generation_strategy.dispatch_utils import choose_generation_strategy
+from ax.generation_strategy.dispatch_utils import choose_generation_strategy_legacy
 from ax.modelbridge.prediction_utils import predict_at_point
 from ax.modelbridge.registry import Generators
 from ax.utils.common.testutils import TestCase
@@ -43,14 +43,14 @@ class TestPredictedEffectsPlot(TestCase):
 
     def test_compute_for_requires_a_gs(self) -> None:
         analysis = PredictedEffectsPlot(metric_name="branin")
-        experiment = get_branin_experiment()
+        experiment = get_branin_experiment(with_batch=True, with_completed_batch=True)
         with self.assertRaisesRegex(UserInputError, "requires a GenerationStrategy"):
             analysis.compute(experiment=experiment)
 
     def test_compute_for_requires_trials(self) -> None:
         analysis = PredictedEffectsPlot(metric_name="branin")
         experiment = get_branin_experiment()
-        generation_strategy = choose_generation_strategy(
+        generation_strategy = choose_generation_strategy_legacy(
             search_space=experiment.search_space,
             experiment=experiment,
         )
@@ -62,7 +62,7 @@ class TestPredictedEffectsPlot(TestCase):
     def test_compute_for_requires_a_model_that_predicts(self) -> None:
         analysis = PredictedEffectsPlot(metric_name="branin")
         experiment = get_branin_experiment(with_batch=True, with_completed_batch=True)
-        generation_strategy = choose_generation_strategy(
+        generation_strategy = choose_generation_strategy_legacy(
             search_space=experiment.search_space,
             experiment=experiment,
         )
@@ -110,22 +110,31 @@ class TestPredictedEffectsPlot(TestCase):
                 self.assertEqual(card.title, f"Predicted Effects for {metric}")
                 self.assertEqual(
                     card.subtitle,
-                    "View a candidate trial and its arms' predicted metric values",
+                    (
+                        "The predicted effects plot provides a visualization of the "
+                        "estimated metric effects for each arm in the upcoming trial. "
+                        "This plot helps in anticipating the potential outcomes and "
+                        "performance of different arms based on the model's "
+                        "predictions. Note that flat predictions across arms indicate "
+                        "that the model has not picked up on sufficient signal in "
+                        "the data, and instead is just predicting the mean."
+                    ),
                 )
                 # AND THEN it has an appropriate level based on whether we're
                 # optimizing for the metric
                 self.assertEqual(
                     card.level,
                     (
-                        AnalysisCardLevel.HIGH
+                        AnalysisCardLevel.HIGH + 2
                         if metric == "branin"
                         else (
-                            AnalysisCardLevel.HIGH - 1
+                            AnalysisCardLevel.HIGH + 1
                             if metric == "constraint_branin"
-                            else AnalysisCardLevel.HIGH - 2
+                            else AnalysisCardLevel.HIGH
                         )
                     ),
                 )
+                self.assertEqual(card.category, AnalysisCardCategory.ACTIONABLE)
                 # AND THEN it has the right rows and columns in the dataframe
                 self.assertEqual(
                     {*card.df.columns},
@@ -310,7 +319,7 @@ class TestPredictedEffectsPlot(TestCase):
     def test_it_works_for_non_batch_experiments(self) -> None:
         # GIVEN an experiment with the default generation strategy
         experiment = get_branin_experiment(with_batch=False)
-        generation_strategy = choose_generation_strategy(
+        generation_strategy = choose_generation_strategy_legacy(
             search_space=experiment.search_space,
             experiment=experiment,
         )

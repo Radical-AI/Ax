@@ -65,27 +65,27 @@ GeneratorSpec
     :undoc-members:
     :show-inheritance:
 
-Model Bridges
--------------
+Adapters
+--------
 
-Base Model Bridge
-~~~~~~~~~~~~~~~~~
+Base Adapter
+~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.base
     :members:
     :undoc-members:
     :show-inheritance:
 
-Discrete Model Bridge
-~~~~~~~~~~~~~~~~~~~~~
+Discrete Adapter
+~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.discrete
     :members:
     :undoc-members:
     :show-inheritance:
 
-Random Model Bridge
-~~~~~~~~~~~~~~~~~~~
+Random Adapter
+~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.random
     :members:
@@ -93,26 +93,18 @@ Random Model Bridge
     :show-inheritance:
     :noindex:
 
-Torch Model Bridge
-~~~~~~~~~~~~~~~~~~
+Torch Adapter
+~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.torch
     :members:
     :undoc-members:
     :show-inheritance:
 
-Pairwise Model Bridge
-~~~~~~~~~~~~~~~~~~~~~
+Pairwise Adapter
+~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.pairwise
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-Map Torch Model Bridge
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.map_torch
     :members:
     :undoc-members:
     :show-inheritance:
@@ -170,6 +162,14 @@ Transforms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.transforms.base
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+`ax.modelbridge.transforms.bilog_y`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.modelbridge.transforms.bilog_y
     :members:
     :undoc-members:
     :show-inheritance:
@@ -262,14 +262,6 @@ Transforms
     :undoc-members:
     :show-inheritance:
 
-`ax.modelbridge.transforms.map_unit_x`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.transforms.map_unit_x
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 `ax.modelbridge.transforms.merge_repeated_measurements`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -324,6 +316,14 @@ Transforms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.transforms.map_key_to_float
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+`ax.modelbridge.transforms.relativize`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.modelbridge.transforms.relativize
     :members:
     :undoc-members:
     :show-inheritance:
@@ -420,14 +420,6 @@ Transforms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.modelbridge.transforms.winsorize
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-`ax.modelbridge.transforms.relativize`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.modelbridge.transforms.relativize
     :members:
     :undoc-members:
     :show-inheritance:

@@ -4,9 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
+# pyre-strict
+
 
 import torch
+from ax.api.configs import GenerationMethod, GenerationStrategyConfig
 from ax.core.trial_status import TrialStatus
 from ax.exceptions.core import UnsupportedError
 from ax.generation_strategy.generation_strategy import (
@@ -17,7 +19,6 @@ from ax.generation_strategy.model_spec import GeneratorSpec
 from ax.generation_strategy.transition_criterion import MinTrials
 from ax.modelbridge.registry import Generators
 from ax.models.torch.botorch_modular.surrogate import ModelConfig, SurrogateSpec
-from ax.preview.api.configs import GenerationMethod, GenerationStrategyConfig
 from botorch.models.transforms.input import Normalize, Warp
 from gpytorch.kernels.linear_kernel import LinearKernel
 
@@ -131,8 +132,9 @@ def _get_mbm_node(
 def choose_generation_strategy(
     gs_config: GenerationStrategyConfig,
 ) -> GenerationStrategy:
-    """Choose a generation strategy based on the properties of the experiment
-    and the inputs provided in ``gs_config``.
+    """
+    Choose a generation strategy based on the properties of the experiment and the
+    inputs provided in ``gs_config``.
 
     NOTE: The behavior of this function is subject to change. It will be updated to
     produce best general purpose generation strategies based on benchmarking results.

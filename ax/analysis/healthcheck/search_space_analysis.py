@@ -11,7 +11,7 @@ from typing import Union
 import numpy as np
 import pandas as pd
 
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.healthcheck.healthcheck_analysis import (
     HealthcheckAnalysis,
     HealthcheckAnalysisCard,
@@ -25,6 +25,7 @@ from ax.core.search_space import SearchSpace
 from ax.core.types import TParameterization
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from pyre_extensions import assert_is_instance
 
 
@@ -55,22 +56,17 @@ class SearchSpaceAnalysis(HealthcheckAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> HealthcheckAnalysisCard:
-        r"""
-        Args:
-            experiment: Ax experiment.
-            generation_strategy: Ax generation strategy.
-
-        Returns:
-            A HealthcheckAnalysisCard object with the information on the parameters
-            and parameter constraints whose boundaries are recommended to be expanded.
-        """
-
         if experiment is None:
             raise UserInputError("SearchSpaceAnalysis requires an Experiment.")
 
         status = HealthcheckStatus.PASS
-        subtitle = "Search space does not need to be updated."
+        subtitle_base = (
+            "The search space analysis health check is designed "
+            "to notify users that would likely see from a search space expansion "
+            "in the form of increased optimization performance.\n\n"
+        )
         title_status = "Success"
         level = AnalysisCardLevel.LOW
         df = pd.DataFrame({"status": [status]})
@@ -90,20 +86,23 @@ class SearchSpaceAnalysis(HealthcheckAnalysis):
                 boundary_proportion_threshold=self.boundary_proportion_threshold,
             )
             status = HealthcheckStatus.WARNING
-            subtitle = msg
+            additional_subtitle = msg
             title_status = "Warning"
             level = AnalysisCardLevel.LOW
             df = boundary_proportions_df[["boundary", "proportion", "bound"]]
             df["status"] = status
+        else:
+            additional_subtitle = "Search space does not need to be updated."
 
         return HealthcheckAnalysisCard(
             name="SearchSpaceAnalysis",
             title=f"Ax Search Space Analysis {title_status}",
             blob=json.dumps({"status": status}),
-            subtitle=subtitle,
+            subtitle=subtitle_base + additional_subtitle,
             df=df,
             level=level,
             attributes={"trial_index": self.trial_index},
+            category=AnalysisCardCategory.DIAGNOSTIC,
         )
 
 

@@ -8,7 +8,7 @@
 
 import numpy as np
 import pandas as pd
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 from ax.analysis.healthcheck.regression_analysis import RegressionAnalysis
 from ax.core.data import Data
 from ax.utils.common.testutils import TestCase
@@ -42,6 +42,7 @@ class TestRegressionAnalysis(TestCase):
             and "Trial 0" in card.subtitle
         )
         self.assertEqual(card.level, AnalysisCardLevel.LOW)
+        self.assertEqual(card.category, AnalysisCardCategory.DIAGNOSTIC)
 
         df = pd.DataFrame(
             {
@@ -59,6 +60,13 @@ class TestRegressionAnalysis(TestCase):
         self.assertEqual(card.title, "Ax Regression Analysis Success")
         self.assertEqual(
             card.subtitle,
-            "No metric regessions detected.",
+            (
+                "The regression analysis health check detects arms "
+                "across all trials that are regressing metrics. While metric "
+                "regressions can happen (especially in exploratory rounds that use "
+                "randomized parameters), users may choose to stop arms that are "
+                "regressing company-critical metrics.\n\n"
+                "No metric regessions detected."
+            ),
         )
         self.assertEqual(card.level, AnalysisCardLevel.LOW)

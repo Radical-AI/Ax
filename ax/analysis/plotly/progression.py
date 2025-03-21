@@ -8,7 +8,7 @@ from logging import Logger
 
 import numpy as np
 import plotly.express as px
-from ax.analysis.analysis import AnalysisCardLevel
+from ax.analysis.analysis import AnalysisCardCategory, AnalysisCardLevel
 
 from ax.analysis.plotly.plotly_analysis import PlotlyAnalysis, PlotlyAnalysisCard
 from ax.analysis.plotly.utils import select_metric
@@ -17,6 +17,7 @@ from ax.core.map_data import MapData
 from ax.core.trial_status import TrialStatus
 from ax.exceptions.core import UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
+from ax.modelbridge.base import Adapter
 from ax.utils.common.logger import get_logger
 from plotly import graph_objects as go
 from pyre_extensions import assert_is_instance
@@ -58,6 +59,7 @@ class ProgressionPlot(PlotlyAnalysis):
         self,
         experiment: Experiment | None = None,
         generation_strategy: GenerationStrategy | None = None,
+        adapter: Adapter | None = None,
     ) -> PlotlyAnalysisCard:
         if experiment is None:
             raise UserInputError("ProgressionPlot requires an Experiment")
@@ -96,13 +98,19 @@ class ProgressionPlot(PlotlyAnalysis):
             experiment=experiment, metric_name=metric_name
         )
 
+        # If there is a nan in the wallclock time dict's keys then lookup will fail. If
+        # this happens, set the wallclock time to nan and continue.
         df["wallclock_time"] = df.apply(
-            lambda row: wallclock_series[row["trial_index"]][row["progression"]],
+            lambda row: wallclock_series[row["trial_index"]].get(
+                row["progression"], np.nan
+            ),
             axis=1,
         )
         if len(terminal_points) > 0:
             terminal_points["wallclock_time"] = terminal_points.apply(
-                lambda row: wallclock_series[row["trial_index"]][row["progression"]],
+                lambda row: wallclock_series[row["trial_index"]].get(
+                    row["progression"], np.nan
+                ),
                 axis=1,
             )
 
@@ -129,10 +137,17 @@ class ProgressionPlot(PlotlyAnalysis):
 
         return self._create_plotly_analysis_card(
             title=f"{metric_name} by {x_axis_name.replace('_', ' ')}",
-            subtitle="Observe how the metric changes as each trial progresses",
+            subtitle=(
+                "The progression plot tracks the evolution of each metric "
+                "over the course of the experiment. This visualization is "
+                "typically used to monitor the improvement of metrics over "
+                "Trial iterations, but can also be useful in informing decisions "
+                "about early stopping for Trials."
+            ),
             level=AnalysisCardLevel.MID,
             df=df,
             fig=fig,
+            category=AnalysisCardCategory.INSIGHT,
         )
 
 

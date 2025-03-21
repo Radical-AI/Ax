@@ -397,32 +397,31 @@ def get_pending_observation_features_based_on_trial_status(
 def extend_pending_observations(
     experiment: Experiment,
     pending_observations: dict[str, list[ObservationFeatures]],
-    generator_runs: list[GeneratorRun],
-) -> dict[str, list[ObservationFeatures]]:
+    generator_run: GeneratorRun,
+) -> None:
     """Extend given pending observations dict (from metric name to observations
     that are pending for that metric), with arms in a given generator run.
+
+    Note: This function performs this operation in-place for performance reasons.
+    It is only used within the ``GenerationStrategy`` class, and is not intended
+    for wide re-use. Please use caution when re-using this function.
 
     Args:
         experiment: Experiment, for which the generation strategy is producing
             ``GeneratorRun``s.
         pending_observations: Dict from metric name to pending observations for
             that metric, used to avoid resuggesting arms that will be explored soon.
-        generator_runs: List of ``GeneratorRun``s currently produced by the
-            ``GenerationStrategy``.
+        generator_run: ``GeneratorRun`` currently produced by the
+            ``GenerationStrategy`` to add to the pending points.
 
-    Returns:
-        A new dictionary of pending observations to avoid in-place modification
     """
-    pending_observations = deepcopy(pending_observations)
-    extended_observations: dict[str, list[ObservationFeatures]] = {}
     for m in experiment.metrics:
-        extended_obs_set = set(pending_observations.get(m, []))
-        for generator_run in generator_runs:
-            for a in generator_run.arms:
-                ob_ft = ObservationFeatures.from_arm(a)
-                extended_obs_set.add(ob_ft)
-        extended_observations[m] = list(extended_obs_set)
-    return extended_observations
+        if m not in pending_observations:
+            pending_observations[m] = []
+        pending_observations[m].extend(
+            ObservationFeatures.from_arm(a) for a in generator_run.arms
+        )
+    return
 
 
 # -------------------- Get target trial utils. ---------------------
@@ -431,13 +430,13 @@ def extend_pending_observations(
 def get_target_trial_index(experiment: Experiment) -> int | None:
     """Get the index of the target trial in the ``Experiment``.
 
-    Find the target trial (among those with data) giving priority in the following
-    order:
+    Find the target trial, among the trials with data for status quo arm, giving
+    priority in the following order:
         1. a running long-run trial. Note if there is a running long-run trial on the
             experiment without data, or if there is no data on the experiment, then
             this will return None.
         2. Most recent trial expecting data with running trials be considered the most
-            recent
+            recent.
 
     In the event of any ties, the tie breaking order is:
         a. longest running trial by duration
@@ -454,8 +453,11 @@ def get_target_trial_index(experiment: Experiment) -> int | None:
     # takes into account the age of the trial, and consider more heavily weighting
     # long run trials.
     df = experiment.lookup_data().df
-    if df.empty:
+    status_quo = experiment.status_quo
+    if df.empty or status_quo is None:
         return None
+    # Filter to only trials with data for status quo arm.
+    df = df[df["arm_name"] == status_quo.name]
     trial_indices_with_data = set(df.trial_index.unique())
     # only consider running trials with data
     running_trials = [

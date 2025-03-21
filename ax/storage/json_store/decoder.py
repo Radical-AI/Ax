@@ -86,7 +86,16 @@ _DEPRECATED_MODEL_TO_REPLACEMENT: dict[str, str] = {
 }
 
 # Deprecated model kwargs, to be removed from GStep / GNodes.
-_DEPRECATED_MODEL_KWARGS: tuple[str, ...] = ("fit_on_update", "torch_dtype")
+_DEPRECATED_MODEL_KWARGS: tuple[str, ...] = (
+    "fit_on_update",
+    "torch_dtype",
+    "status_quo_name",
+    "status_quo_features",
+)
+
+# Deprecated node input constructors, removed from GNodes.
+# NOTE: These are the enum keys, which are typically upper-case.
+_DEPRECATED_NODE_INPUT_CONSTRUCTORS: tuple[str, ...] = ("STATUS_QUO_FEATURES",)
 
 
 @dataclass
@@ -321,6 +330,19 @@ def generator_run_from_json(
             for k, v in object_json.items()
         }
     )
+    # Remove deprecated kwargs from model kwargs & bridge kwargs.
+    if generator_run._model_kwargs is not None:
+        generator_run._model_kwargs = {
+            k: v
+            for k, v in generator_run._model_kwargs.items()
+            if k not in _DEPRECATED_MODEL_KWARGS
+        }
+    if generator_run._bridge_kwargs is not None:
+        generator_run._bridge_kwargs = {
+            k: v
+            for k, v in generator_run._bridge_kwargs.items()
+            if k not in _DEPRECATED_MODEL_KWARGS
+        }
     generator_run._time_created = object_from_json(
         time_created_json,
         decoder_registry=decoder_registry,
@@ -644,14 +666,16 @@ def generation_node_from_json(
     # recursively decode dictionary key values.
     decoded_input_constructors = None
     if "input_constructors" in generation_node_json.keys():
-        decoded_input_constructors = {
-            InputConstructorPurpose[key]: object_from_json(
+        decoded_input_constructors = {}
+        for key, value in generation_node_json.pop("input_constructors").items():
+            if key in _DEPRECATED_NODE_INPUT_CONSTRUCTORS:
+                # Skip deprecated input constructors.
+                continue
+            decoded_input_constructors[InputConstructorPurpose[key]] = object_from_json(
                 value,
                 decoder_registry=decoder_registry,
                 class_decoder_registry=class_decoder_registry,
             )
-            for key, value in generation_node_json.pop("input_constructors").items()
-        }
 
     return GenerationNode(
         node_name=generation_node_json.pop("node_name"),

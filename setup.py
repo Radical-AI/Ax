@@ -8,18 +8,9 @@ import os
 
 from setuptools import find_packages, setup
 
-PINNED_BOTORCH_VERSION = "0.14.0"
-
-if os.environ.get("ALLOW_BOTORCH_LATEST"):
-    # allows a more recent previously installed version of botorch to remain
-    # if there is no previously installed version, installs the latest release
-    botorch_req = f"botorch>={PINNED_BOTORCH_VERSION}"
-else:
-    botorch_req = f"botorch=={PINNED_BOTORCH_VERSION}"
-
 
 REQUIRES = [
-    botorch_req,
+    "botorch @ git+https://github.com/Radical-AI/botorch.git@6fb6da0044fa57018e87735dc6deb6ba177e0130",
     "jinja2",  # also a Plotly dep
     "pandas",
     "scipy",

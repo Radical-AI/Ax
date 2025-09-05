@@ -20,7 +20,7 @@ classifiers = [
 dynamic = ["version"]
 
 dependencies = [
-    "botorch[pymoo]>=0.15.1",
+    "botorch @ git+https://github.com/Radical-AI/botorch.git@a852fe878372f293465215bf9556b128324beff7",
     "jinja2",  # also a Plotly dep
     "pandas",
     "scipy",

@@ -885,13 +885,7 @@ class Experiment(Base):
                     rows that share the same values
                     for "trial_index", "metric_name", and "arm_name" in new_df
         """
-        last_ts, last_data = list(current_trial_data.items())[-1]
-        # Get the init args other than 'df' for last data
-        # in case it was a child class of `Data`
-        last_data_init_args = last_data.deserialize_init_args(
-            last_data.serialize_init_args(last_data)
-        )
-        del last_data_init_args["df"]
+        _, last_data = list(current_trial_data.items())[-1]
 
         last_data_type = type(last_data)
         merge_keys = ["trial_index", "metric_name", "arm_name"]
@@ -922,7 +916,7 @@ class Experiment(Base):
         # Remove the "_left" suffix from the column names
         last_df.columns = last_df.columns.str.replace(r"_left$", "", regex=True)
 
-        return type(last_data), last_data_type(df=last_df, **last_data_init_args)
+        return type(last_data), last_data_type(df=last_df)
 
     def attach_fetch_results(
         self,
@@ -1072,11 +1066,11 @@ class Experiment(Base):
     def trials(self) -> dict[int, BaseTrial]:
         """The trials associated with the experiment.
 
-        NOTE: If some trials on this experiment specify their TTL, `RUNNING` trials
+        NOTE: If some trials on this experiment specify their TTL, `CANDIDATE` trials
         will be checked for whether their TTL elapsed during this call. Found past-
-        TTL trials will be marked as `FAILED`.
+        TTL trials will be marked as `STALE`.
         """
-        self._check_TTL_on_running_trials()
+        self._check_TTL_on_candidate_trials()
         return self._trials
 
     @property
@@ -1107,7 +1101,7 @@ class Experiment(Base):
         """Indices of trials associated with the experiment, grouped by trial
         status.
         """
-        self._check_TTL_on_running_trials()  # Marks past-TTL trials as failed.
+        self._check_TTL_on_candidate_trials()  # Marks past-TTL trials as stale.
         return self._trial_indices_by_status
 
     @property
@@ -1553,9 +1547,9 @@ class Experiment(Base):
         self._arms_by_signature[arm.signature] = arm
         self._arms_by_name[arm.name] = arm
 
-    def _check_TTL_on_running_trials(self) -> None:
-        """Checks whether any past-TTL trials are still marked as `RUNNING`
-        and marks them as failed if so.
+    def _check_TTL_on_candidate_trials(self) -> None:
+        """Checks whether any past-TTL trials are still marked as `CANDIDATE`
+        and marks them as stale if so.
 
         NOTE: this function just calls `trial.status` for each trial, as the
         computation of that property checks the TTL for trials.
@@ -1563,8 +1557,11 @@ class Experiment(Base):
         if not self._trials_have_ttl:
             return
 
-        running = list(self._trial_indices_by_status[TrialStatus.RUNNING])
-        for idx in running:
+        # The trial status changes during TTL check modifies the original set
+        # _trial_indices_by_status, hence create a copy of indices for iteration
+        candidate_indices = self._trial_indices_by_status[TrialStatus.CANDIDATE].copy()
+
+        for idx in candidate_indices:
             self._trials[idx].status  # `status` property checks TTL if applicable.
 
     def _cache_metric_fetch_error(

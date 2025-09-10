@@ -21,6 +21,7 @@ dynamic = ["version"]
 
 dependencies = [
     "botorch @ git+https://github.com/Radical-AI/botorch.git@a87a8ba97",
+    "gpytorch @ git+https://github.com/cornellius-gp/gpytorch.git@8433c0b",
     "jinja2",  # also a Plotly dep
     "pandas",
     "scipy",

@@ -19,7 +19,6 @@ from ax.generators.torch.botorch_modular.kernels import (
 )
 
 from ax.generators.torch.botorch_modular.multi_acquisition import MultiAcquisition
-from ax.generators.torch.botorch_modular.sebo import SEBOAcquisition
 
 # BoTorch `AcquisitionFunction` imports
 from botorch.acquisition.acquisition import AcquisitionFunction
@@ -46,6 +45,7 @@ from botorch.acquisition.max_value_entropy_search import (
 from botorch.acquisition.monte_carlo import (
     qExpectedImprovement,
     qNoisyExpectedImprovement,
+    qUpperConfidenceBound,
 )
 from botorch.acquisition.multi_objective.logei import (
     qLogExpectedHypervolumeImprovement,
@@ -156,6 +156,7 @@ ACQUISITION_FUNCTION_REGISTRY: dict[type[AcquisitionFunction], str] = {
     qMultiFidelityKnowledgeGradient: "qMultiFidelityKnowledgeGradient",
     qMultiFidelityMaxValueEntropy: "qMultiFidelityMaxValueEntropy",
     qNoisyExpectedImprovement: "qNoisyExpectedImprovement",
+    qUpperConfidenceBound: "qUpperConfidenceBound",
     # LogEI family below:
     LogExpectedImprovement: "LogExpectedImprovement",
     LogNoisyExpectedImprovement: "LogNoisyExpectedImprovement",
@@ -326,6 +327,3 @@ def register_mll(mll_class: type[MarginalLogLikelihood]) -> None:
     class_name = mll_class.__name__
     CLASS_TO_REGISTRY[MarginalLogLikelihood].update({mll_class: class_name})
     CLASS_TO_REVERSE_REGISTRY[MarginalLogLikelihood].update({class_name: mll_class})
-
-
-register_acquisition(SEBOAcquisition)

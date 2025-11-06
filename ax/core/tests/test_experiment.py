@@ -17,6 +17,7 @@ from ax.core.arm import Arm
 from ax.core.auxiliary import AuxiliaryExperiment, AuxiliaryExperimentPurpose
 from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.data import Data
+from ax.core.evaluations_to_data import DataType, raw_evaluations_to_data
 from ax.core.experiment import sort_by_trial_index_and_arm_name
 from ax.core.map_data import MapData
 from ax.core.map_metric import MapMetric
@@ -40,8 +41,11 @@ from ax.exceptions.core import (
     OptimizationNotConfiguredError,
     RunnerNotFoundError,
     UnsupportedError,
+    UserInputError,
 )
 from ax.metrics.branin import BraninMetric
+from ax.metrics.hartmann6 import Hartmann6Metric
+from ax.metrics.noisy_function import NoisyFunctionMetric
 from ax.runners.synthetic import SyntheticRunner
 from ax.service.ax_client import AxClient
 from ax.service.utils.instantiation import ObjectiveProperties
@@ -76,9 +80,14 @@ from ax.utils.testing.mock import mock_botorch_optimize
 from pandas.testing import assert_frame_equal
 from pyre_extensions import assert_is_instance
 
-DUMMY_RUN_METADATA_KEY = "test_run_metadata_key"
-DUMMY_RUN_METADATA_VALUE = "test_run_metadata_value"
-DUMMY_RUN_METADATA: dict[str, str] = {DUMMY_RUN_METADATA_KEY: DUMMY_RUN_METADATA_VALUE}
+DUMMY_RUN_METADATA_KEY_1 = "test_run_metadata_key_1"
+DUMMY_RUN_METADATA_KEY_2 = "test_run_metadata_key_2"
+DUMMY_RUN_METADATA_VALUE_1 = "test_run_metadata_value_1"
+DUMMY_RUN_METADATA_VALUE_2 = "test_run_metadata_value_2"
+DUMMY_RUN_METADATA: dict[str, str] = {
+    DUMMY_RUN_METADATA_KEY_1: DUMMY_RUN_METADATA_VALUE_1,
+    DUMMY_RUN_METADATA_KEY_2: DUMMY_RUN_METADATA_VALUE_2,
+}
 DUMMY_ABANDONED_REASON = "test abandoned reason"
 DUMMY_ARM_NAME = "test_arm_name"
 
@@ -94,7 +103,7 @@ class TestMetric(Metric):
 class SyntheticRunnerWithMetadataKeys(SyntheticRunner):
     @property
     def run_metadata_report_keys(self) -> list[str]:
-        return [DUMMY_RUN_METADATA_KEY]
+        return [DUMMY_RUN_METADATA_KEY_1, DUMMY_RUN_METADATA_KEY_2]
 
 
 class ExperimentTest(TestCase):
@@ -353,6 +362,111 @@ class ExperimentTest(TestCase):
         with self.assertRaises(ValueError):
             self.experiment.search_space = extra_param_ss
 
+    def test_AddSearchSpaceParameters(self) -> None:
+        new_param = RangeParameter(
+            name="new_param",
+            parameter_type=ParameterType.FLOAT,
+            lower=0.0,
+            upper=1.0,
+        )
+
+        with self.subTest("Add parameter to experiment with no trials"):
+            experiment = self.experiment.clone_with(trial_indices=[])
+            experiment.add_parameters_to_search_space(
+                parameters=[new_param],
+                status_quo_values={new_param.name: 0.0},
+            )
+            # Verify parameter was added
+            self.assertIn("new_param", experiment.search_space.parameters)
+            self.assertEqual(experiment.search_space.parameters["new_param"], new_param)
+            # Verify backfill value was used as status quo
+            self.assertIsNotNone(experiment.status_quo)
+            self.assertIn("new_param", experiment.status_quo.parameters)
+            self.assertEqual(experiment.status_quo.parameters["new_param"], 0.0)
+
+        with self.subTest("Add parameter with status quo value"):
+            experiment = self.experiment.clone_with(trial_indices=[])
+            experiment.add_parameters_to_search_space(
+                parameters=[new_param], status_quo_values={"new_param": 1.0}
+            )
+            # Verify parameter was added
+            self.assertIn("new_param", experiment.search_space.parameters)
+            self.assertEqual(experiment.search_space.parameters["new_param"], new_param)
+            # Verify backfill value was used as status quo
+            self.assertIsNotNone(experiment.status_quo)
+            self.assertIn("new_param", experiment.status_quo.parameters)
+            self.assertEqual(experiment.status_quo.parameters["new_param"], 1.0)
+
+        with self.subTest("Test error when adding parameter that already exists"):
+            experiment = self.experiment.clone_with(trial_indices=[])
+            existing_param = self.experiment.search_space.parameters["w"]
+            with self.assertRaises(UserInputError):
+                experiment.add_parameters_to_search_space(parameters=[existing_param])
+
+        with self.subTest(
+            "Test error when adding parameters to experiment with trials but no "
+            "backfill values"
+        ):
+            experiment = self.experiment.clone_with()
+            experiment.new_batch_trial()
+            with self.assertRaises(UserInputError):
+                experiment.add_parameters_to_search_space(parameters=[new_param])
+
+        with self.subTest(
+            "Test successfully adding parameters with backfill values when trials exist"
+        ):
+            experiment = self.experiment.clone_with()
+            experiment.new_batch_trial()
+            new_param._backfill_value = 0.5
+            experiment.add_parameters_to_search_space(
+                parameters=[new_param], status_quo_values={new_param.name: 0.0}
+            )
+            # Verify parameter was added
+            self.assertIn("new_param", experiment.search_space.parameters)
+            self.assertEqual(experiment.search_space.parameters["new_param"], new_param)
+            # Verify backfill value was used as status quo
+            self.assertIsNotNone(experiment.status_quo)
+            self.assertIn("new_param", experiment.status_quo.parameters)
+            self.assertEqual(experiment.status_quo.parameters["new_param"], 0.0)
+
+    def test_DisableSearchSpaceParameters(self) -> None:
+        with self.subTest(
+            "Test error when trying to disable parameter not in search space"
+        ):
+            experiment = self.experiment.clone_with()
+            with self.assertRaises(UserInputError):
+                experiment.disable_parameters_in_search_space({"nonexistent": 1.0})
+
+        with self.subTest("Test error when providing invalid default value"):
+            experiment = self.experiment.clone_with()
+            with self.assertRaises(UserInputError):
+                experiment.disable_parameters_in_search_space({"w": "string_value"})
+
+        with self.subTest("Test successfully disabling parameter"):
+            experiment = self.experiment.clone_with()
+            experiment.disable_parameters_in_search_space({"w": 2.5})
+            # Verify parameter was disabled (has default value)
+            self.assertEqual(experiment.search_space.parameters["w"].default_value, 2.5)
+
+        with self.subTest("Test re-enable parameter"):
+            # Using the same experiment as above
+            parameter = experiment.search_space.parameters["w"].clone()
+            parameter._default_value = None
+            experiment.add_parameters_to_search_space(parameters=[parameter])
+            # Verify parameter was re-enabled
+            self.assertIsNone(experiment.search_space.parameters["w"].default_value)
+
+    def test_OptimizationConfigSetter(self) -> None:
+        # Establish current metrics size
+        self.assertEqual(
+            len(get_optimization_config().metrics) + 1, len(self.experiment.metrics)
+        )
+
+        # Add optimization config with 1 different metric
+        opt_config = get_optimization_config()
+        opt_config.outcome_constraints[0].metric = Metric(name="m3")
+        self
+
     def test_StatusQuoSetter(self) -> None:
         sq_parameters = self.experiment.status_quo.parameters
 
@@ -361,7 +475,6 @@ class ExperimentTest(TestCase):
         self.experiment.status_quo = Arm(sq_parameters)
         self.assertEqual(self.experiment.status_quo.parameters["w"], 3.5)
         self.assertEqual(self.experiment.status_quo.name, "status_quo_e0")
-        self.assertTrue("status_quo" not in self.experiment.arms_by_name)
 
         # Verify all None values
         self.experiment.status_quo = Arm({n: None for n in sq_parameters.keys()})
@@ -387,9 +500,9 @@ class ExperimentTest(TestCase):
         with self.assertRaises(ValueError):
             self.experiment.status_quo = Arm(sq_parameters)
 
-        # Verify arms_by_signature, arms_by_name only contains status_quo
-        self.assertEqual(len(self.experiment.arms_by_signature), 1)
-        self.assertEqual(len(self.experiment.arms_by_name), 1)
+        # Verify arms_by_signature, arms_by_name contain all three versions of the SQ
+        self.assertEqual(len(self.experiment.arms_by_signature), 3)
+        self.assertEqual(len(self.experiment.arms_by_name), 3)
 
         # Try to change status_quo after trials have been created
         _ = self.experiment.new_batch_trial(should_add_status_quo_arm=True)
@@ -434,7 +547,12 @@ class ExperimentTest(TestCase):
         self.assertEqual(len(exp.arms_by_name), 4 * n)
 
         # Verify that `metrics` kwarg to `experiment.fetch_data` is respected.
-        exp.add_tracking_metric(Metric(name="not_yet_on_experiment"))
+        exp.add_tracking_metric(
+            Metric(
+                name="not_yet_on_experiment",
+                signature_override="not_yet_on_experiment_signature",
+            )
+        )
         exp.attach_data(
             Data(
                 df=pd.DataFrame.from_records(
@@ -445,6 +563,7 @@ class ExperimentTest(TestCase):
                             "mean": 3,
                             "sem": 0,
                             "trial_index": 0,
+                            "metric_signature": "not_yet_on_experiment_signature",
                         }
                     ]
                 )
@@ -452,11 +571,33 @@ class ExperimentTest(TestCase):
         )
         self.assertEqual(
             set(
-                exp.fetch_data(metrics=[Metric(name="not_yet_on_experiment")])
+                exp.fetch_data(
+                    metrics=[
+                        Metric(
+                            name="not_yet_on_experiment",
+                            signature_override="not_yet_on_experiment_signature",
+                        )
+                    ]
+                )
                 .df["metric_name"]
                 .values
             ),
             {"not_yet_on_experiment"},
+        )
+        self.assertEqual(
+            set(
+                exp.fetch_data(
+                    metrics=[
+                        Metric(
+                            name="not_yet_on_experiment",
+                            signature_override="not_yet_on_experiment_signature",
+                        )
+                    ]
+                )
+                .df["metric_signature"]
+                .values
+            ),
+            {"not_yet_on_experiment_signature"},
         )
 
         # Verify data lookup includes trials attached from `fetch_data`.
@@ -466,7 +607,7 @@ class ExperimentTest(TestCase):
         t1 = exp.attach_data(batch_data)
         t2 = exp.attach_data(exp_data)
 
-        full_dict = exp.data_by_trial
+        full_dict = exp._data_by_trial
         self.assertEqual(len(full_dict), 2)  # data for 2 trials
         self.assertEqual(len(full_dict[0]), 6)  # 6 data objs for batch 0
 
@@ -488,6 +629,7 @@ class ExperimentTest(TestCase):
                         "mean": 3,
                         "sem": 0,
                         "trial_index": 0,
+                        "metric_signature": "not_yet_on_experiment_signature",
                     },
                     {
                         "arm_name": "0_0",
@@ -495,6 +637,7 @@ class ExperimentTest(TestCase):
                         "mean": 3,
                         "sem": 0,
                         "trial_index": 0,
+                        "metric_signature": "z",
                     },
                 ]
             )
@@ -528,6 +671,42 @@ class ExperimentTest(TestCase):
         self.assertEqual(
             exp.fetch_data(metrics=[Metric(name="not_on_experiment")]), Data()
         )
+
+    def test_bulk_configure_metrics(self) -> None:
+        exp = get_branin_experiment_with_multi_objective()
+        exp.add_tracking_metric(
+            metric=Hartmann6Metric(name="no update", param_names=["x"])
+        )
+        # apply update to metric properties manually
+        inital_metrics = exp.metrics
+        for metric in inital_metrics.values():
+            if isinstance(metric, BraninMetric):
+                metric.param_names = ["foo", "bar"]
+
+        with self.subTest("updates both brannin metrics, but not hartmann"):
+            exp.bulk_configure_metrics_of_class(
+                metric_class=BraninMetric,
+                attributes_to_update={"param_names": ["foo", "bar"]},
+            )
+            self.assertEqual(inital_metrics, exp.metrics)
+            # double check the change is populated in opt config too
+            inital_metrics.pop("no update")
+            self.assertIsNotNone(exp.optimization_config)
+            self.assertEqual(inital_metrics, exp.optimization_config.metrics)
+        with self.subTest("parameter not in initialization"):
+            with self.assertRaisesRegex(
+                UserInputError, "does not contain the requested "
+            ):
+                exp.bulk_configure_metrics_of_class(
+                    metric_class=BraninMetric,
+                    attributes_to_update={"fake": 1},
+                )
+        with self.subTest("no metrics to update"):
+            with self.assertRaisesRegex(UserInputError, "No metrics of class"):
+                exp.bulk_configure_metrics_of_class(
+                    metric_class=NoisyFunctionMetric,
+                    attributes_to_update={"fake": 1},
+                )
 
     def test_OverwriteExistingData(self) -> None:
         n = 10
@@ -667,6 +846,7 @@ class ExperimentTest(TestCase):
                     "1_13",
                 ],
                 "metric_name": ["b"] * 9,
+                "metric_signature": ["b"] * 9,
                 "mean": list(range(1, 10)),
                 "sem": [0.1 + i * 0.05 for i in range(9)],
                 "trial_index": [0, 0, 0, 0, 0, 1, 1, 1, 1],
@@ -686,6 +866,7 @@ class ExperimentTest(TestCase):
                         "0_11",
                     ],
                     "metric_name": ["b"] * 5,
+                    "metric_signature": ["b"] * 5,
                     "mean": [5.0, 1.0, 4.0, 2.0, 3.0],
                     "sem": [0.3, 0.1, 0.25, 0.15, 0.2],
                 }
@@ -703,6 +884,7 @@ class ExperimentTest(TestCase):
                         "1_13",
                     ],
                     "metric_name": ["b"] * 4,
+                    "metric_signature": ["b"] * 4,
                     "mean": [6.0, 7.0, 8.0, 9.0],
                     "sem": [0.35, 0.4, 0.45, 0.5],
                 }
@@ -716,7 +898,7 @@ class ExperimentTest(TestCase):
         )
         for trial_index in [0, 1]:
             assert_frame_equal(
-                list(exp.data_by_trial[trial_index].values())[0].df,
+                list(exp._data_by_trial[trial_index].values())[0].df,
                 sorted_dfs[trial_index],
             )
 
@@ -752,7 +934,7 @@ class ExperimentTest(TestCase):
     def test_AttachBatchTrialNoArmNames(self) -> None:
         num_trials = len(self.experiment.trials)
 
-        attached_parameterizations, trial_index = self.experiment.attach_trial(
+        _, trial_index = self.experiment.attach_trial(
             parameterizations=[
                 {"w": 5.3, "x": 5, "y": "baz", "z": True, "d": 11.6},
                 {"w": 5.2, "x": 5, "y": "foo", "z": True, "d": 11.4},
@@ -772,7 +954,7 @@ class ExperimentTest(TestCase):
     def test_AttachBatchTrialWithArmNames(self) -> None:
         num_trials = len(self.experiment.trials)
 
-        attached_parameterizations, trial_index = self.experiment.attach_trial(
+        _, trial_index = self.experiment.attach_trial(
             parameterizations=[
                 {"w": 5.3, "x": 5, "y": "baz", "z": True, "d": 11.6},
                 {"w": 5.2, "x": 5, "y": "foo", "z": True, "d": 11.4},
@@ -797,7 +979,7 @@ class ExperimentTest(TestCase):
     def test_AttachSingleArmTrialNoArmName(self) -> None:
         num_trials = len(self.experiment.trials)
 
-        attached_parameterization, trial_index = self.experiment.attach_trial(
+        _, trial_index = self.experiment.attach_trial(
             parameterizations=[{"w": 5.3, "x": 5, "y": "baz", "z": True, "d": 11.6}],
             ttl_seconds=3600,
             run_metadata={"test_metadata_field": 1},
@@ -809,7 +991,7 @@ class ExperimentTest(TestCase):
     def test_AttachSingleArmTrialWithArmName(self) -> None:
         num_trials = len(self.experiment.trials)
 
-        attached_parameterization, trial_index = self.experiment.attach_trial(
+        _, trial_index = self.experiment.attach_trial(
             parameterizations=[{"w": 5.3, "x": 5, "y": "baz", "z": True, "d": 11.6}],
             arm_names=["arm1"],
             ttl_seconds=3600,
@@ -977,10 +1159,27 @@ class ExperimentTest(TestCase):
         new_experiment.optimization_config.objective.metric.noise_sd = 0
         new_experiment.warm_start_from_old_experiment(
             old_experiment=old_experiment,
-            copy_run_metadata_keys=[DUMMY_RUN_METADATA_KEY],
             trial_statuses_to_copy=[TrialStatus.COMPLETED],
         )
         self.assertEqual(len(new_experiment.trials), len(old_experiment.trials) - 3)
+        # check that all run_metadata was copied by default
+        for _, trial in new_experiment.trials.items():
+            self.assertDictEqual(trial.run_metadata, DUMMY_RUN_METADATA)
+
+        # check that only run_metadata of specified keys are copied
+        new_experiment = get_branin_experiment()
+        new_experiment.optimization_config.objective.metric.noise_sd = 0
+        new_experiment.warm_start_from_old_experiment(
+            old_experiment=old_experiment,
+            copy_run_metadata_keys=[DUMMY_RUN_METADATA_KEY_1],
+            trial_statuses_to_copy=[TrialStatus.COMPLETED],
+        )
+        self.assertEqual(len(new_experiment.trials), len(old_experiment.trials) - 3)
+        for _, trial in new_experiment.trials.items():
+            self.assertDictEqual(
+                trial.run_metadata,
+                {DUMMY_RUN_METADATA_KEY_1: DUMMY_RUN_METADATA_VALUE_1},
+            )
 
         # Warm start from an experiment with only a subset of metrics
         map_data_experiment = get_branin_experiment_with_timestamp_map_metric()
@@ -1070,6 +1269,7 @@ class ExperimentTest(TestCase):
                 "mean": [100.0],
                 "sem": [1.0],
                 "trial_index": [1],
+                "metric_signature": ["branin"],
             },
         )
         cloned_experiment = experiment.clone_with(trial_indices=[1], data=Data(df=df))
@@ -1099,7 +1299,7 @@ class ExperimentTest(TestCase):
                 expected_data_by_trial[trial_index] = OrderedDict(
                     list(original_trial_data.items())[-1:]
                 )
-        self.assertEqual(cloned_experiment.data_by_trial, expected_data_by_trial)
+        self.assertEqual(cloned_experiment._data_by_trial, expected_data_by_trial)
 
         experiment = get_experiment()
         cloned_experiment = experiment.clone_with()
@@ -1118,9 +1318,7 @@ class ExperimentTest(TestCase):
             with_completed_batch=True,
         )
         experiment.trials[0]._trial_type = "foo"
-        with self.assertRaisesRegex(
-            ValueError, "Experiment does not support trial_type foo."
-        ):
+        with self.assertRaisesRegex(ValueError, ".* foo is not supported by the exp"):
             experiment.clone_with()
         cloned_experiment = experiment.clone_with(clear_trial_type=True)
         self.assertIsNone(cloned_experiment.trials[0].trial_type)
@@ -1481,6 +1679,72 @@ class ExperimentTest(TestCase):
         )
         self.assertTrue(df_completed.equals(expected_completed_df))
 
+    def test_to_df_with_relativize(self) -> None:
+        """Test the relativize flag in to_df method with status quo."""
+        # Create an experiment with status quo and completed trials
+        experiment = get_branin_experiment(
+            with_status_quo=True, with_completed_batch=True
+        )
+
+        with self.subTest("without relativization"):
+            df_no_rel = experiment.to_df(relativize=False)
+
+            # Verify dataframe has expected structure
+            self.assertGreater(len(df_no_rel), 0)
+            self.assertIn("trial_index", df_no_rel.columns)
+            self.assertIn("arm_name", df_no_rel.columns)
+
+            # Branin experiment has a single metric named "branin"
+            metric_name = "branin"
+            self.assertIn(metric_name, df_no_rel.columns)
+
+            # Verify metric values are numeric, not percentage strings
+            values = df_no_rel[metric_name]
+            for val in values:
+                self.assertIsInstance(
+                    val, float, "Non-relativized values should be floats"
+                )
+
+        with self.subTest("with relativization"):
+            df_with_rel = experiment.to_df(relativize=True)
+            df_no_rel = experiment.to_df(relativize=False)
+
+            # Verify structure is preserved
+            self.assertEqual(len(df_with_rel), len(df_no_rel))
+            self.assertEqual(set(df_with_rel.columns), set(df_no_rel.columns))
+
+            # Branin experiment has a single metric named "branin"
+            metric_name = "branin"
+
+            # Verify relativization for the metric
+            self.assertIsNotNone(experiment.status_quo)
+            status_quo_name = experiment.status_quo.name
+
+            # Status quo should be 0% after relativization (using .4g format)
+            sq_rel_values = df_with_rel[df_with_rel["arm_name"] == status_quo_name][
+                metric_name
+            ]
+            for val in sq_rel_values:
+                self.assertEqual(val, "0%", "Status quo should be relativized to 0%")
+
+            # Non-status-quo arms should have percentage strings
+            non_sq_rel_values = df_with_rel[df_with_rel["arm_name"] != status_quo_name][
+                metric_name
+            ]
+            for val in non_sq_rel_values:
+                self.assertIsInstance(val, str, "Relativized values should be strings")
+                self.assertTrue(
+                    val.endswith("%"), "Relativized values should end with %"
+                )
+
+            # Verify at least one non-status-quo value is non-zero
+            has_nonzero = any(float(v.rstrip("%")) != 0.0 for v in non_sq_rel_values)
+            self.assertTrue(
+                has_nonzero,
+                "At least one non-status-quo arm should have non-zero "
+                "relativized value",
+            )
+
 
 class ExperimentWithMapDataTest(TestCase):
     def setUp(self) -> None:
@@ -1509,24 +1773,35 @@ class ExperimentWithMapDataTest(TestCase):
         }
 
         self.experiment.add_tracking_metric(
-            metric=MapMetric(name="no_fetch_impl_metric")
+            metric=MapMetric(
+                name="no_fetch_impl_metric",
+                signature_override="no_fetch_impl_metric_signature",
+            )
         )
         self.experiment.new_trial()
         self.experiment.trials[0].mark_running(no_runner_required=True)
-        first_epoch = MapData.from_map_evaluations(
-            evaluations={
+        first_epoch = raw_evaluations_to_data(
+            raw_data={
                 arm_name: partial_results[0:1]
                 for arm_name, partial_results in evaluations.items()
             },
             trial_index=0,
+            metric_name_to_signature={
+                "no_fetch_impl_metric": "no_fetch_impl_metric_signature",
+            },
+            data_type=DataType.MAP_DATA,
         )
         self.experiment.attach_data(first_epoch)
-        remaining_epochs = MapData.from_map_evaluations(
-            evaluations={
+        remaining_epochs = raw_evaluations_to_data(
+            raw_data={
                 arm_name: partial_results[1:4]
                 for arm_name, partial_results in evaluations.items()
             },
             trial_index=0,
+            metric_name_to_signature={
+                "no_fetch_impl_metric": "no_fetch_impl_metric_signature",
+            },
+            data_type=DataType.MAP_DATA,
         )
         self.experiment.attach_data(remaining_epochs)
         self.experiment.trials[0].mark_completed()
@@ -1549,7 +1824,7 @@ class ExperimentWithMapDataTest(TestCase):
             # Fetch other metrics and merge Data into the cached MapData
             full_data = exp.fetch_data()
 
-            self.assertEqual(len(full_data.true_df), len(map_data.true_df) + 20)
+            self.assertEqual(len(full_data.full_df), len(map_data.full_df) + 20)
 
     def test_is_moo_problem(self) -> None:
         exp = get_branin_experiment()
@@ -1588,10 +1863,7 @@ class ExperimentWithMapDataTest(TestCase):
         new_experiment.optimization_config.objective.metric.noise_sd = 0
         for _, trial in old_experiment.trials.items():
             trial._run_metadata = DUMMY_RUN_METADATA
-        new_experiment.warm_start_from_old_experiment(
-            old_experiment=old_experiment,
-            copy_run_metadata_keys=[DUMMY_RUN_METADATA_KEY],
-        )
+        new_experiment.warm_start_from_old_experiment(old_experiment=old_experiment)
         self.assertEqual(len(new_experiment.trials), len(old_experiment.trials) - 1)
         i_old_trial = 0
         for _, trial in new_experiment.trials.items():
@@ -1608,8 +1880,24 @@ class ExperimentWithMapDataTest(TestCase):
             self.assertEqual(
                 trial._properties["generation_model_key"], Generators.SOBOL.value
             )
+            # check that all run_metadata is copied by default
             self.assertDictEqual(trial.run_metadata, DUMMY_RUN_METADATA)
             i_old_trial += 1
+
+        # check that only run_metadata of specified keys are copied
+        new_experiment = get_branin_experiment_with_timestamp_map_metric()
+        new_experiment.optimization_config.objective.metric.noise_sd = 0
+        for _, trial in old_experiment.trials.items():
+            trial._run_metadata = DUMMY_RUN_METADATA
+        new_experiment.warm_start_from_old_experiment(
+            old_experiment=old_experiment,
+            copy_run_metadata_keys=[DUMMY_RUN_METADATA_KEY_1],
+        )
+        for _, trial in new_experiment.trials.items():
+            self.assertDictEqual(
+                trial.run_metadata,
+                {DUMMY_RUN_METADATA_KEY_1: DUMMY_RUN_METADATA_VALUE_1},
+            )
 
         # Check that the data was attached for correct trials
 
@@ -1910,6 +2198,7 @@ class ExperimentWithMapDataTest(TestCase):
                 "metric_name": ["b"] * 12,
                 "mean": [float(x) for x in range(1, 13)],
                 "sem": [0.1 + i * 0.05 for i in range(12)],
+                "metric_signature": ["b"] * 12,
             }
         )
 
@@ -1946,6 +2235,7 @@ class ExperimentWithMapDataTest(TestCase):
                     0.6,
                     0.65,
                 ],
+                "metric_signature": ["b"] * 12,
             }
         )
 
@@ -1993,3 +2283,34 @@ class ExperimentWithMapDataTest(TestCase):
         self.assertTrue(candidate_trial_with_ttl.status.is_stale)
         self.assertTrue(running_trial.status.is_running)
         self.assertTrue(completed_trial.status.is_completed)
+
+    def test_extract_relevant_trials(self) -> None:
+        experiment = get_branin_experiment(with_completed_trial=True)  # 0 - COMPLETED
+        experiment.new_trial().mark_running(no_runner_required=True)  # 1 - RUNNING
+        experiment.new_trial().mark_running(
+            no_runner_required=True
+        ).mark_failed()  # 2 - FAILED
+        experiment.new_trial()  # 3 - CANDIDATE
+
+        with self.subTest("No filters returns all trials"):
+            trials = experiment.extract_relevant_trials()
+            self.assertEqual(len(trials), 4)
+
+        with self.subTest("Filter by trial indices"):
+            trials = experiment.extract_relevant_trials(trial_indices=[0, 2])
+            self.assertEqual({t.index for t in trials}, {0, 2})
+
+        with self.subTest("Filter by trial statuses"):
+            trials = experiment.extract_relevant_trials(
+                trial_indices=None,
+                trial_statuses=[TrialStatus.COMPLETED, TrialStatus.FAILED],
+            )
+            self.assertEqual({t.index for t in trials}, {0, 2})
+
+        with self.subTest("Filter by both indices and statuses"):
+            trials = experiment.extract_relevant_trials(
+                trial_indices=[0, 1, 2],
+                trial_statuses=[TrialStatus.COMPLETED],
+            )
+            self.assertEqual(len(trials), 1)
+            self.assertEqual(trials[0].index, 0)

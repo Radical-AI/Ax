@@ -19,7 +19,6 @@ import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.exceptions.core import SearchSpaceExhausted, UnsupportedError
 from ax.generators.types import TConfig
-from botorch.acquisition.risk_measures import RiskMeasureMCObjective
 from botorch.exceptions.warnings import OptimizationWarning
 from pyre_extensions import assert_is_instance
 from torch import Tensor
@@ -31,7 +30,7 @@ TTensoray = TypeVar("TTensoray", bound=Tensoray)
 
 
 class TorchGeneratorLike(Protocol):
-    """A protocol that stands in for ``TorchModel`` like objects that
+    """A protocol that stands in for ``TorchGenerator`` like objects that
     have a ``predict`` method.
     """
 
@@ -111,13 +110,12 @@ def rejection_sample(
         raise ValueError("Rounding function must be provided for deduplication.")
 
     # Rejection sample with parameter constraints.
-    points = np.zeros((n, d))
+    points = np.zeros((0, d))
     attempted_draws = 0
-    successful_draws = 0
     if max_draws is None:
         max_draws = DEFAULT_MAX_RS_DRAWS
 
-    while successful_draws < n and attempted_draws <= max_draws:
+    while points.shape[0] < n and attempted_draws < max_draws:
         # _gen_unconstrained returns points including fixed features.
         # pyre-ignore: Anonymous function w/ named args.
         point = gen_unconstrained(
@@ -142,24 +140,13 @@ def rejection_sample(
                 # should be rare since the point is feasible in the continuous space.
                 point = rounding_func(point)
 
+            points = np.concatenate([points, point[None, :]], axis=0)
             # Deduplicate: don't add the same point twice.
-            duplicate = False
             if deduplicate:
-                if existing_points is not None:
-                    prev_points = np.vstack(
-                        [points[:successful_draws, :], existing_points]
-                    )
-                else:
-                    prev_points = points[:successful_draws, :]
-                duplicate = check_duplicate(point=point, points=prev_points)
-
-            # Add point if valid.
-            if not duplicate:
-                points[successful_draws] = point
-                successful_draws += 1
+                points = remove_duplicates(points, existing_points)
         attempted_draws += 1
 
-    if successful_draws < n:
+    if points.shape[0] < n:
         # Only possible if attempted_draws >= max_draws.
         raise SearchSpaceExhausted(
             f"Rejection sampling error (specified maximum draws ({max_draws}) exhausted"
@@ -170,20 +157,36 @@ def rejection_sample(
     return (points, attempted_draws)
 
 
-def check_duplicate(point: npt.NDArray, points: npt.NDArray) -> bool:
-    """Check if a point exists in another array.
+def remove_duplicates(
+    points: npt.NDArray,
+    existing_points: npt.NDArray | None = None,
+) -> npt.NDArray:
+    """Remove any point in points if it is duplicate or contained in existing_points.
 
     Args:
-        point: Newly generated point to check.
-        points: Points previously generated.
+        points: Points to remove duplicates from.
+        existing_points: Additional points to check for duplicates.
 
     Returns:
-        True if the point is contained in points, else False
+        Points with duplicates removed.
     """
-    for p in points:
-        if np.array_equal(p, point):
-            return True
-    return False
+    if existing_points is None:
+        existing_points = np.empty((0, points.shape[1]))
+
+    unique_points = np.empty((0, points.shape[1]))
+    for point in points:
+        # Check if point has already been added to unique points
+        if np.any(np.all(point == unique_points, axis=1)):
+            continue
+
+        # Check if point is duplicate of existing points
+        if np.any(np.all(point == existing_points, axis=1)):
+            continue
+
+        # Add current point to our collection of unique points
+        unique_points = np.concatenate([unique_points, point[None, :]], axis=0)
+
+    return unique_points
 
 
 def add_fixed_features(
@@ -291,7 +294,6 @@ def best_observed_point(
     outcome_constraints: tuple[TTensoray, TTensoray] | None = None,
     linear_constraints: tuple[TTensoray, TTensoray] | None = None,
     fixed_features: dict[int, float] | None = None,
-    risk_measure: RiskMeasureMCObjective | None = None,
     options: TConfig | None = None,
 ) -> TTensoray | None:
     """Select the best point that has been observed.
@@ -337,7 +339,6 @@ def best_observed_point(
             A x <= b.
         fixed_features: A map {feature_index: value} for features that
             should be fixed to a particular value in the best point.
-        risk_measure: An optional risk measure for reporting best robust point.
         options: A config dictionary with settings described above.
 
     Returns:
@@ -353,7 +354,6 @@ def best_observed_point(
         outcome_constraints=outcome_constraints,
         linear_constraints=linear_constraints,
         fixed_features=fixed_features,
-        risk_measure=risk_measure,
         options=options,
     )
     return None if best_point_and_value is None else best_point_and_value[0]
@@ -367,7 +367,6 @@ def best_in_sample_point(
     outcome_constraints: tuple[TTensoray, TTensoray] | None = None,
     linear_constraints: tuple[TTensoray, TTensoray] | None = None,
     fixed_features: dict[int, float] | None = None,
-    risk_measure: RiskMeasureMCObjective | None = None,
     options: TConfig | None = None,
 ) -> tuple[TTensoray, float] | None:
     """Select the best point that has been observed.
@@ -414,7 +413,6 @@ def best_in_sample_point(
             A x <= b.
         fixed_features: A map {feature_index: value} for features that
             should be fixed to a particular value in the best point.
-        risk_measure: An optional risk measure for reporting best robust point.
         options: A config dictionary with settings described above.
 
     Returns:
@@ -422,11 +420,6 @@ def best_in_sample_point(
         - d-array of the best point,
         - utility at the best point.
     """
-    if risk_measure is not None:
-        # TODO[T131759268]: We need to apply the risk measure. Instead of doing obj_w @,
-        # we could use `get_botorch_objective_and_transform` to get the objective
-        # then apply it, though we also need to decide how to deal with constraints.
-        raise NotImplementedError
     # Parse options
     if options is None:
         options = {}

@@ -30,7 +30,7 @@ from ax.core.optimization_config import (
 )
 from ax.core.outcome_constraint import ObjectiveThreshold, OutcomeConstraint
 from ax.core.types import ComparisonOp
-from ax.exceptions.core import DataRequiredError
+from ax.exceptions.core import DataRequiredError, UserInputError
 from ax.generation_strategy.dispatch_utils import choose_generation_strategy_legacy
 from ax.service.ax_client import AxClient
 from ax.service.utils.best_point import (
@@ -209,6 +209,7 @@ class TestBestPointUtils(TestCase):
                         "metric_name": "wrong",
                         "mean": 1.0,
                         "sem": None,
+                        "metric_signature": "wrong",
                     },
                 ]
             )
@@ -221,24 +222,56 @@ class TestBestPointUtils(TestCase):
 
         df = pd.DataFrame.from_records(
             data=[
-                {"trial_index": 0, "arm_name": "0_0", "metric_name": "m1", "mean": 1.0},
-                {"trial_index": 0, "arm_name": "0_0", "metric_name": "m2", "mean": 1.0},
+                {
+                    "trial_index": 0,
+                    "arm_name": "0_0",
+                    "metric_name": "m1",
+                    "mean": 1.0,
+                    "metric_signature": "m1",
+                },
+                {
+                    "trial_index": 0,
+                    "arm_name": "0_0",
+                    "metric_name": "m2",
+                    "mean": 1.0,
+                    "metric_signature": "m2",
+                },
                 # infeasible
-                {"trial_index": 0, "arm_name": "0_1", "metric_name": "m1", "mean": 2.0},
+                {
+                    "trial_index": 0,
+                    "arm_name": "0_1",
+                    "metric_name": "m1",
+                    "mean": 2.0,
+                    "metric_signature": "m1",
+                },
                 {
                     "trial_index": 0,
                     "arm_name": "0_1",
                     "metric_name": "m2",
                     "mean": -1.0,
+                    "metric_signature": "m2",
                 },
                 {
                     "trial_index": 1,
                     "arm_name": "0_0",
                     "metric_name": "extraneous",
                     "mean": 4.0,
+                    "metric_signature": "extraneous",
                 },
-                {"trial_index": 1, "arm_name": "0_0", "metric_name": "m1", "mean": 3.0},
-                {"trial_index": 1, "arm_name": "0_0", "metric_name": "m2", "mean": 0.0},
+                {
+                    "trial_index": 1,
+                    "arm_name": "0_0",
+                    "metric_name": "m1",
+                    "mean": 3.0,
+                    "metric_signature": "m1",
+                },
+                {
+                    "trial_index": 1,
+                    "arm_name": "0_0",
+                    "metric_name": "m2",
+                    "mean": 0.0,
+                    "metric_signature": "m2",
+                },
             ]
         ).assign(sem=None)
 
@@ -639,6 +672,9 @@ class TestBestPointUtils(TestCase):
             # This is not a real test of `derelativize_opt_config` but rather
             # making sure the values on the experiment have't drifted
             self.assertEqual(status_quo_df["metric_name"].tolist(), ["m1", "m2", "m3"])
+            self.assertEqual(
+                status_quo_df["metric_signature"].tolist(), ["m1", "m2", "m3"]
+            )
             self.assertEqual(status_quo_df["mean"].tolist(), [3.0, -2.0, -1.0])
 
             status_quo_obs = observations[status_quo_trial_index]
@@ -857,7 +893,7 @@ class TestBestPointUtils(TestCase):
         )
 
         with self.assertRaisesRegex(
-            ValueError,
+            UserInputError,
             "Could not find valid baseline arm.",
         ):
             select_baseline_name_default_first_trial(

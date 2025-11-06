@@ -7,45 +7,30 @@
 # pyre-strict
 
 from contextlib import ExitStack
-from typing import Any, cast
+from typing import Any
 from unittest import mock
 from warnings import catch_warnings, simplefilter
 
 import numpy as np
 import torch
 from ax.core.search_space import SearchSpaceDigest
-from ax.generators.torch.botorch_defaults import NO_OBSERVED_POINTS_MESSAGE
 from ax.generators.torch.botorch_modular.generator import BoTorchGenerator
-from ax.generators.torch.botorch_moo import MultiObjectiveLegacyBoTorchGenerator
-from ax.generators.torch.botorch_moo_defaults import (
-    get_outcome_constraint_transforms,
-    get_qLogEHVI,
-    get_qLogNEHVI,
+from ax.generators.torch.botorch_moo_utils import (
     get_weighted_mc_objective_and_objective_thresholds,
     infer_objective_thresholds,
     pareto_frontier_evaluator,
 )
-from ax.generators.torch.utils import _get_X_pending_and_observed
 from ax.generators.torch_base import TorchGenerator
-from ax.utils.common.random import with_rng_seed
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.mock import mock_botorch_optimize_context_manager
 from botorch.models.gp_regression import SingleTaskGP
-from botorch.models.model import Model
 from botorch.utils.datasets import SupervisedDataset
 from botorch.utils.multi_objective.hypervolume import infer_reference_point
-from botorch.utils.testing import MockModel, MockPosterior
+from botorch.utils.testing import MockPosterior
 from gpytorch.utils.warnings import NumericalWarning
-from torch._tensor import Tensor
 
 
-MOO_DEFAULTS_PATH: str = "ax.generators.torch.botorch_moo_defaults"
-GET_ACQF_PATH: str = MOO_DEFAULTS_PATH + ".get_acquisition_function"
-GET_CONSTRAINT_PATH: str = MOO_DEFAULTS_PATH + ".get_outcome_constraint_transforms"
-GET_OBJ_PATH: str = (
-    MOO_DEFAULTS_PATH + ".get_weighted_mc_objective_and_objective_thresholds"
-)
-FIT_MODEL_MO_PATH = "ax.generators.torch.botorch_defaults.fit_gpytorch_mll"
+MOO_DEFAULTS_PATH: str = "ax.generators.torch.botorch_moo_utils"
 
 
 def _fit_model(
@@ -89,7 +74,7 @@ class FrontierEvaluatorTest(TestCase):
     def test_pareto_frontier_raise_error_when_missing_data(self) -> None:
         with self.assertRaises(ValueError):
             pareto_frontier_evaluator(
-                model=MultiObjectiveLegacyBoTorchGenerator(),
+                model=BoTorchGenerator(),
                 objective_thresholds=self.objective_thresholds,
                 objective_weights=self.objective_weights,
                 Yvar=self.Yvar,
@@ -151,17 +136,7 @@ class FrontierEvaluatorTest(TestCase):
         self.assertTrue(torch.equal(torch.tensor([], dtype=torch.long), indx))
 
     def test_pareto_frontier_evaluator_predict(self) -> None:
-        def dummy_predict(
-            model: Model,
-            X: Tensor,
-            use_posterior_predictive: bool = False,
-        ) -> tuple[Tensor, Tensor]:
-            # Add column to X that is a product of previous elements.
-            mean = torch.cat([X, torch.prod(X, dim=1).reshape(-1, 1)], dim=1)
-            cov = torch.zeros(mean.shape[0], mean.shape[1], mean.shape[1])
-            return mean, cov
-
-        model = MultiObjectiveLegacyBoTorchGenerator(model_predictor=dummy_predict)
+        model = BoTorchGenerator()
         _fit_model(model=model, X=self.X, Y=self.Y, Yvar=self.Yvar)
 
         Y, _, indx = pareto_frontier_evaluator(
@@ -171,11 +146,11 @@ class FrontierEvaluatorTest(TestCase):
             X=self.X,
         )
         pred = self.Y[2:4]
-        self.assertAllClose(Y, pred)
+        self.assertAllClose(Y, pred, rtol=1e-3)
         self.assertTrue(torch.equal(torch.arange(2, 4), indx))
 
     def test_pareto_frontier_evaluator_with_outcome_constraints(self) -> None:
-        model = MultiObjectiveLegacyBoTorchGenerator()
+        model = BoTorchGenerator()
         Y, _, indx = pareto_frontier_evaluator(
             model=model,
             objective_weights=self.objective_weights,
@@ -237,20 +212,7 @@ class FrontierEvaluatorTest(TestCase):
         self.assertEqual(idx.tolist(), [4])
 
 
-class BotorchMOODefaultsTest(TestCase):
-    def test_get_qLogEHVI_input_validation_errors(self) -> None:
-        weights = torch.ones(2)
-        objective_thresholds = torch.zeros(2)
-        # Note: this is a real BoTorch `Model` with a real `Posterior`, not a
-        # `unittest.mock.Mock`
-        mm = MockModel(posterior=MockPosterior())
-        with self.assertRaisesRegex(ValueError, NO_OBSERVED_POINTS_MESSAGE):
-            get_qLogEHVI(
-                model=mm,
-                objective_weights=weights,
-                objective_thresholds=objective_thresholds,
-            )
-
+class BotorchMOOUtilsTest(TestCase):
     def test_get_weighted_mc_objective_and_objective_thresholds(self) -> None:
         objective_weights = torch.tensor([0.0, 1.0, 0.0, 1.0])
         objective_thresholds = torch.arange(4, dtype=torch.float)
@@ -265,75 +227,12 @@ class BotorchMOODefaultsTest(TestCase):
         self.assertEqual(weighted_obj.outcomes.tolist(), [1, 3])
         self.assertTrue(torch.equal(new_obj_thresholds, objective_thresholds[[1, 3]]))
 
-    def test_get_qLogNEHVI_input_validation_errors(self) -> None:
-        weights = torch.ones(2)
-        objective_thresholds = torch.zeros(2)
-        with self.assertRaisesRegex(ValueError, NO_OBSERVED_POINTS_MESSAGE):
-            get_qLogNEHVI(
-                # pyre-fixme[6] In call `get_qLogNEHVI`, for argument `model`,
-                # expected `Model` but got `None`.
-                model=None,
-                objective_weights=weights,
-                objective_thresholds=objective_thresholds,
-            )
-
-    @mock.patch(  # pyre-ignore
-        "ax.generators.torch.botorch_moo_defaults._check_posterior_type",
-        wraps=lambda y: y,
-    )
-    def test_get_qLogEHVI(self, _) -> None:
-        weights = torch.tensor([0.0, 1.0, 1.0])
-        X_observed = torch.rand(4, 3)
-        X_pending = torch.rand(1, 3)
-        constraints = (torch.tensor([1.0, 0.0, 0.0]), torch.tensor([[10.0]]))
-        Y = torch.rand(4, 3)
-        mm = MockModel(MockPosterior(mean=Y))
-        objective_thresholds = torch.arange(3, dtype=torch.float)
-        obj_and_obj_t = get_weighted_mc_objective_and_objective_thresholds(
-            objective_weights=weights,
-            objective_thresholds=objective_thresholds,
-        )
-        (weighted_obj, new_obj_thresholds) = obj_and_obj_t
-        cons_tfs = get_outcome_constraint_transforms(constraints)
-        with with_rng_seed(0):
-            seed = torch.randint(1, 10000, (1,)).item()
-        with ExitStack() as es:
-            mock_get_acqf = es.enter_context(mock.patch(GET_ACQF_PATH))
-            es.enter_context(
-                mock.patch(MOO_DEFAULTS_PATH + ".assert_is_instance", wraps=cast)
-            )
-            es.enter_context(mock.patch(GET_CONSTRAINT_PATH, return_value=cons_tfs))
-            es.enter_context(mock.patch(GET_OBJ_PATH, return_value=obj_and_obj_t))
-            es.enter_context(with_rng_seed(0))
-            get_qLogEHVI(
-                model=mm,
-                objective_weights=weights,
-                outcome_constraints=constraints,
-                objective_thresholds=objective_thresholds,
-                X_observed=X_observed,
-                X_pending=X_pending,
-            )
-            mock_get_acqf.assert_called_once_with(
-                acquisition_function_name="qLogEHVI",
-                model=mm,
-                objective=weighted_obj,
-                X_observed=X_observed,
-                X_pending=X_pending,
-                constraints=cons_tfs,
-                mc_samples=128,
-                alpha=0.0,
-                seed=seed,
-                ref_point=new_obj_thresholds.tolist(),
-                Y=Y,
-            )
-
     # test infer objective thresholds alone
     @mock.patch(  # pyre-ignore
-        "ax.generators.torch.botorch_moo_defaults._check_posterior_type",
+        "ax.generators.torch.botorch_moo_utils._check_posterior_type",
         wraps=lambda y: y,
     )
     def test_infer_objective_thresholds(self, _, cuda: bool = False) -> None:
-        # TODO: refactor this test into smaller test cases
         for dtype in (torch.float, torch.double):
             tkwargs: dict[str, Any] = {
                 "device": torch.device("cuda") if cuda else torch.device("cpu"),
@@ -349,27 +248,15 @@ class BotorchMOODefaultsTest(TestCase):
                 )
             )
             Xs = [torch.tensor([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]], **tkwargs)]
-            bounds = [(0.0, 1.0), (1.0, 4.0), (2.0, 5.0)]
             outcome_constraints = (
                 torch.tensor([[1.0, 0.0, 0.0]], **tkwargs),
                 torch.tensor([[10.0]], **tkwargs),
             )
-            linear_constraints = (
-                torch.tensor([1.0, 0.0, 0.0], **tkwargs),
-                torch.tensor([2.0], **tkwargs),
-            )
             objective_weights = torch.tensor([-1.0, -1.0, 0.0], **tkwargs)
             with ExitStack() as es:
-                _mock_get_X_pending_and_observed = es.enter_context(
-                    mock.patch(
-                        "ax.generators.torch.botorch_moo_defaults."
-                        "_get_X_pending_and_observed",
-                        wraps=_get_X_pending_and_observed,
-                    )
-                )
                 _mock_infer_reference_point = es.enter_context(
                     mock.patch(
-                        "ax.generators.torch.botorch_moo_defaults"
+                        "ax.generators.torch.botorch_moo_utils"
                         ".infer_reference_point",
                         wraps=infer_reference_point,
                     )
@@ -379,32 +266,12 @@ class BotorchMOODefaultsTest(TestCase):
                     mock.patch.object(model, "posterior", return_value=posterior)
                 )
 
-                # test passing Xs
                 obj_thresholds = infer_objective_thresholds(
-                    model,
-                    bounds=bounds,
+                    model=model,
                     objective_weights=objective_weights,
+                    X_observed=Xs[0],
                     outcome_constraints=outcome_constraints,
-                    fixed_features={},
-                    linear_constraints=linear_constraints,
-                    Xs=Xs + Xs,
                 )
-            _mock_get_X_pending_and_observed.assert_called_once()
-            ckwargs = _mock_get_X_pending_and_observed.call_args[1]
-            actual_Xs = ckwargs["Xs"]
-            for X in actual_Xs:
-                self.assertTrue(torch.equal(X, Xs[0]))
-            self.assertEqual(ckwargs["bounds"], bounds)
-            self.assertTrue(
-                torch.equal(ckwargs["objective_weights"], objective_weights)
-            )
-            oc = ckwargs["outcome_constraints"]
-            self.assertTrue(torch.equal(oc[0], outcome_constraints[0]))
-            self.assertTrue(torch.equal(oc[1], outcome_constraints[1]))
-            self.assertEqual(ckwargs["fixed_features"], {})
-            lc = ckwargs["linear_constraints"]
-            self.assertTrue(torch.equal(lc[0], linear_constraints[0]))
-            self.assertTrue(torch.equal(lc[1], linear_constraints[1]))
             _mock_infer_reference_point.assert_called_once()
             ckwargs = _mock_infer_reference_point.call_args[1]
             self.assertEqual(ckwargs["scale"], 0.1)
@@ -419,52 +286,6 @@ class BotorchMOODefaultsTest(TestCase):
             )
             self.assertTrue(np.isnan(obj_thresholds[2].item()))
 
-            with ExitStack() as es:
-                _mock_get_X_pending_and_observed = es.enter_context(
-                    mock.patch(
-                        "ax.generators.torch.botorch_moo_defaults."
-                        "_get_X_pending_and_observed",
-                        wraps=_get_X_pending_and_observed,
-                    )
-                )
-                _mock_infer_reference_point = es.enter_context(
-                    mock.patch(
-                        "ax.generators.torch.botorch_moo_defaults"
-                        ".infer_reference_point",
-                        wraps=infer_reference_point,
-                    )
-                )
-                es.enter_context(
-                    mock.patch.object(model, "posterior", return_value=posterior)
-                )
-
-                # test passing X_observed
-                obj_thresholds = infer_objective_thresholds(
-                    model,
-                    objective_weights=objective_weights,
-                    outcome_constraints=outcome_constraints,
-                    X_observed=Xs[0],
-                )
-            _mock_get_X_pending_and_observed.assert_not_called()
-            self.assertTrue(
-                torch.equal(obj_thresholds[:2], torch.tensor([9.9, 3.3], **tkwargs))
-            )
-            self.assertTrue(np.isnan(obj_thresholds[2].item()))
-
-            # test that value error is raised if bounds are not supplied
-            with self.assertRaises(ValueError):
-                infer_objective_thresholds(
-                    model,
-                    objective_weights=objective_weights,
-                    Xs=Xs + Xs,
-                )
-            # test that value error is raised if Xs are not supplied
-            with self.assertRaises(ValueError):
-                infer_objective_thresholds(
-                    model,
-                    bounds=bounds,
-                    objective_weights=objective_weights,
-                )
             # test subset_model without subset_idcs
             with mock.patch.object(model, "posterior", return_value=posterior):
                 obj_thresholds = infer_objective_thresholds(
@@ -501,16 +322,9 @@ class BotorchMOODefaultsTest(TestCase):
                 torch.tensor([[5.0]], **tkwargs),
             )
             with ExitStack() as es:
-                _mock_get_X_pending_and_observed = es.enter_context(
-                    mock.patch(
-                        "ax.generators.torch.botorch_moo_defaults."
-                        "_get_X_pending_and_observed",
-                        wraps=_get_X_pending_and_observed,
-                    )
-                )
                 _mock_infer_reference_point = es.enter_context(
                     mock.patch(
-                        "ax.generators.torch.botorch_moo_defaults"
+                        "ax.generators.torch.botorch_moo_utils"
                         ".infer_reference_point",
                         wraps=infer_reference_point,
                     )
@@ -530,15 +344,11 @@ class BotorchMOODefaultsTest(TestCase):
                         ),
                     )
                 )
-                # test passing Xs
                 obj_thresholds = infer_objective_thresholds(
-                    model,
-                    bounds=bounds,
+                    model=model,
                     objective_weights=objective_weights,
+                    X_observed=Xs[0],
                     outcome_constraints=outcome_constraints,
-                    fixed_features={},
-                    linear_constraints=linear_constraints,
-                    Xs=Xs + Xs + Xs,
                 )
             self.assertTrue(
                 torch.equal(obj_thresholds[:2], torch.tensor([9.9, 3.3], **tkwargs))

@@ -27,7 +27,7 @@ from ax.exceptions.core import AxError, UserInputError
 from ax.generation_strategy.generation_strategy import GenerationStrategy
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
-from ax.utils.stats.statstools import relativize
+from ax.utils.stats.math_utils import relativize
 from botorch.utils.probability.utils import compute_log_prob_feas_from_bounds
 from pyre_extensions import none_throws
 
@@ -78,8 +78,20 @@ def extract_relevant_adapter(
         )
 
     generation_strategy.current_node._fit(experiment=experiment)
+    adapter = generation_strategy.adapter
 
-    return none_throws(generation_strategy.adapter)
+    if adapter is None:
+        raise UserInputError(
+            "Currently, Ax has not yet reached a GenerationNode that involves fitting "
+            "a surrogate model, from which it can make predictions about points in the "
+            "search space (current GenerationNode: "
+            f"{generation_strategy.current_node}). This analysis will become available "
+            "once that optimization state is reached, later in the course of the "
+            "experiment. To generate this analysis on-demand when interacting with the "
+            "Analysis directly, please provide an Adapter."
+        )
+
+    return adapter
 
 
 def prepare_arm_data(
@@ -129,9 +141,7 @@ def prepare_arm_data(
     if len(metric_names) < 1:
         raise UserInputError("Must provide at least one metric name.")
 
-    missing_metrics = (
-        set(metric_names) - set(experiment.metrics.keys()) - {"p_feasible"}
-    )
+    missing_metrics = set(metric_names) - set(experiment.metrics.keys())
     if missing_metrics:
         raise UserInputError(
             f"Requested metrics {missing_metrics} are not present in the experiment."
@@ -156,7 +166,6 @@ def prepare_arm_data(
     # during prediction if using model predictions, and to relativize against the
     # status quo arm from the target trial if relativizing.
     target_trial_index = get_target_trial_index(experiment=experiment)
-    filtered_metric_names = [name for name in metric_names if name != "p_feasible"]
     if use_model_predictions:
         if adapter is None:
             raise UserInputError(
@@ -182,7 +191,7 @@ def prepare_arm_data(
 
         df = _prepare_modeled_arm_data(
             experiment=experiment,
-            metric_names=filtered_metric_names,
+            metric_names=metric_names,
             adapter=adapter,
             trial_index=trial_index,
             trial_statuses=trial_statuses,
@@ -198,7 +207,7 @@ def prepare_arm_data(
             )
 
         df = _prepare_raw_arm_data(
-            metric_names=filtered_metric_names,
+            metric_names=metric_names,
             experiment=experiment,
             trial_index=trial_index,
             trial_statuses=trial_statuses,
@@ -224,7 +233,7 @@ def prepare_arm_data(
             df = relativize_data(
                 experiment=experiment,
                 df=df,
-                metric_names=filtered_metric_names,
+                metric_names=metric_names,
                 is_raw_data=is_raw_data,
                 trial_index=trial_index,
                 trial_statuses=trial_statuses,
@@ -237,6 +246,12 @@ def prepare_arm_data(
         lambda trial_index: experiment.trials[trial_index].status.name
         if trial_index != -1
         else "Additional Arm"
+    )
+    df["fail_reason"] = df["trial_index"].apply(
+        lambda trial_index: experiment.trials[trial_index].failed_reason
+        if trial_index != -1
+        and experiment.trials[trial_index].failed_reason is not None
+        else None
     )
 
     df["generation_node"] = df.apply(
@@ -293,18 +308,24 @@ def _prepare_modeled_arm_data(
     # Extract the information necessary to construct each row of the DataFrame.
 
     # Filter trials by trial_index, target_trial_index, and trial_statuses
-    filtered_trials = [
-        trial
-        for trial in experiment.trials.values()
-        if (
-            (
-                (trial.index == trial_index)
-                or (trial_index is None)
-                or (trial.index == target_trial_index)
-            )
-            and ((trial_statuses is None) or (trial.status in trial_statuses))
-        )
-    ]
+    # Determine what to pass to extract_relevant_trials:
+    # - None: no filtering, get all trials (when trial_index is None)
+    # - []: no trials (when trial_index=-1 and no target_trial_index)
+    # - [indices]: specific trials (when trial_index is specified and not None)
+    if trial_index is None:
+        trial_indices_arg = None
+    else:
+        trial_indices_to_filter: set[int] = set()
+        if trial_index != -1:
+            trial_indices_to_filter.add(trial_index)
+        if target_trial_index is not None:
+            trial_indices_to_filter.add(target_trial_index)
+        trial_indices_arg = list(trial_indices_to_filter)
+
+    filtered_trials = experiment.extract_relevant_trials(
+        trial_indices=trial_indices_arg,
+        trial_statuses=trial_statuses,
+    )
 
     # Exclude abandoned arms if the trial is of type BatchTrial
     # https://www.internalfb.com/code/fbsource/[a19525e3f9e6]/fbcode/ax/core/batch_trial.py?lines=51
@@ -331,25 +352,17 @@ def _prepare_modeled_arm_data(
     trial_index_arm_pairs += [(-1, arm) for arm in additional_arms or []]
 
     # Remove arms with missing parameters since we cannot predict for them.
-    predictable_pairs = [
-        (trial_index, arm)
-        for trial_index, arm in trial_index_arm_pairs
-        # Remove arms outside of the search space since we cannot predict for them.
-        if experiment.search_space.check_membership(
+    predictable_pairs = []
+    unpredictable_pairs = []
+    for trial_index, arm in trial_index_arm_pairs:
+        if adapter.model_space.check_membership(
             parameterization=arm.parameters,
             raise_error=False,
             check_all_parameters_present=True,
-        )
-    ]
-    unpredictable_pairs = [
-        (trial_index, arm)
-        for trial_index, arm in trial_index_arm_pairs
-        if not experiment.search_space.check_membership(
-            parameterization=arm.parameters,
-            raise_error=False,
-            check_all_parameters_present=True,
-        )
-    ]
+        ):
+            predictable_pairs.append((trial_index, arm))
+        else:
+            unpredictable_pairs.append((trial_index, arm))
 
     # Batch predict for efficiency.
     predictions = adapter.predict(
@@ -362,7 +375,6 @@ def _prepare_modeled_arm_data(
             for _, arm in predictable_pairs
         ]
     )
-    filtered_metric_names = [name for name in metric_names if name != "p_feasible"]
     records = [
         *[
             {
@@ -372,12 +384,12 @@ def _prepare_modeled_arm_data(
                 else f"{Keys.UNNAMED_ARM.value}_{i}",
                 **{
                     f"{metric_name}_mean": predictions[0][metric_name][i]
-                    for metric_name in filtered_metric_names
+                    for metric_name in metric_names
                 },
                 **{
                     f"{metric_name}_sem": predictions[1][metric_name][metric_name][i]
                     ** 0.5
-                    for metric_name in filtered_metric_names
+                    for metric_name in metric_names
                 },
             }
             for i in range(len(predictable_pairs))
@@ -388,10 +400,8 @@ def _prepare_modeled_arm_data(
                 "arm_name": unpredictable_pairs[i][1].name
                 if unpredictable_pairs[i][1].has_name
                 else f"{Keys.UNNAMED_ARM.value}_{i}",
-                **{
-                    f"{metric_name}_mean": None for metric_name in filtered_metric_names
-                },
-                **{f"{metric_name}_sem": None for metric_name in filtered_metric_names},
+                **{f"{metric_name}_mean": None for metric_name in metric_names},
+                **{f"{metric_name}_sem": None for metric_name in metric_names},
             }
             for i in range(len(unpredictable_pairs))
         ],
@@ -417,17 +427,38 @@ def _prepare_raw_arm_data(
         - METRIC_NAME_sem for each metric_name in metric_names
     """
     # Trial index of -1 indicates candidate arms, we don't have observed data for
-    # hypothetical arms so return an empty df
-    if trial_index == -1:
-        return pd.DataFrame()
+    # hypothetical arms so return an empty df.
+    if trial_index == -1 and target_trial_index is None:
+        return pd.DataFrame(
+            columns=(
+                [
+                    "trial_index",
+                    "arm_name",
+                    *[f"{metric_name}_mean" for metric_name in metric_names],
+                    *[f"{metric_name}_sem" for metric_name in metric_names],
+                ]
+            )
+        )
     else:
-        trials = [
-            trial
-            for trial in experiment.trials.values()
-            if (trial.index == trial_index or trial_index is None)
-            and ((trial_statuses is None) or (trial.status in trial_statuses))
-            or (trial.index == target_trial_index)
-        ]
+        # Filter trials by trial_index, target_trial_index, and trial_statuses
+        # Determine what to pass to extract_relevant_trials:
+        # - None: no filtering, get all trials (when trial_index is None)
+        # - []: no trials (when trial_index=-1 and no target_trial_index)
+        # - [indices]: specific trials (when trial_index is specified and not None)
+        if trial_index is None:
+            trial_indices_arg = None
+        else:
+            trial_indices_to_filter: set[int] = set()
+            if trial_index != -1:
+                trial_indices_to_filter.add(trial_index)
+            if target_trial_index is not None:
+                trial_indices_to_filter.add(target_trial_index)
+            trial_indices_arg = list(trial_indices_to_filter)
+
+        trials = experiment.extract_relevant_trials(
+            trial_indices=trial_indices_arg,
+            trial_statuses=trial_statuses,
+        )
         data_df = experiment.lookup_data(
             trial_indices=[trial.index for trial in trials]
         ).df
@@ -789,8 +820,8 @@ def _get_status_quo_df(
         status_quo_df = pd.DataFrame(status_quo_rows)[
             [
                 "trial_index",
-                *[f"{name}_mean" for name in metric_names if name != "p_feasible"],
-                *[f"{name}_sem" for name in metric_names if name != "p_feasible"],
+                *[f"{name}_mean" for name in metric_names],
+                *[f"{name}_sem" for name in metric_names],
             ]
         ]
     return status_quo_df
@@ -802,25 +833,107 @@ def get_lower_is_better(experiment: Experiment, metric_name: str) -> bool | None
     return experiment.metrics[metric_name].lower_is_better
 
 
-def update_metric_names_if_using_p_feasible(
-    metric_names: Sequence[str], experiment: Experiment
-) -> list[str]:
-    """Return a new list of unique metric names including metrics in
-    metric_names and metrics involved in constraints if using p(feasible).
+def validate_experiment(
+    experiment: Experiment | None,
+    require_trials: bool = False,
+    require_data: bool = False,
+) -> str | None:
     """
-    unique_metric_names = set(metric_names)
-    if "p_feasible" in unique_metric_names:
-        if "p_feasible" in experiment.metrics.keys():
-            raise AxError(
-                "p_feasible is reserved for plotting the probability of"
-                " feasibility of an arm with respect to outcome constraints"
-                " in Ax AnalysisCards, but there is a name collision with a "
-                " metric named p_feasible on the experiment."
-            )
-        optimization_config = none_throws(
-            experiment.optimization_config,
-            "Cannot compute p_feasible without an optimization config.",
+    Validate that the Analysis has been provided an Experiment, and optionally check if
+    the Experiment has trials and data.
+
+    Typically used in Analysis.validate_applicable_state(...), which is called before
+    Analysis.compute(...) in Analysis.compute_result(...).
+    """
+
+    if experiment is None:
+        return "Requires an Experiment."
+
+    if require_trials:
+        if len(experiment.trials) == 0:
+            return "Experiment has no trials."
+
+    if require_data:
+        if experiment.lookup_data().df.empty:
+            return "Experiment has no data."
+
+
+def validate_experiment_has_trials(
+    experiment: Experiment,
+    trial_indices: Sequence[int] | None,
+    trial_statuses: Sequence[TrialStatus] | None,
+    required_metric_names: Sequence[str] | None,
+) -> str | None:
+    filtered_trials = experiment.extract_relevant_trials(
+        trial_indices=trial_indices,
+        trial_statuses=trial_statuses,
+    )
+
+    if len(filtered_trials) == 0:
+        return f"Experiment has no trials in {trial_indices=} with {trial_statuses=}."
+
+    if required_metric_names is not None:
+        filtered_trial_indices = [trial.index for trial in filtered_trials]
+        metric_names = (
+            experiment.lookup_data(trial_indices=filtered_trial_indices)
+            .df["metric_name"]
+            .unique()
         )
-        for oc in optimization_config.outcome_constraints:
-            unique_metric_names.add(oc.metric.name)
-    return list(unique_metric_names)
+
+        missing_metrics = {*required_metric_names} - {*metric_names}
+
+        if len(missing_metrics) > 0:
+            return (
+                f"Experiment has no data for metrics {missing_metrics} in "
+                f"{trial_indices=} with {trial_statuses=}."
+            )
+
+
+def validate_adapter_can_predict(
+    experiment: Experiment | None,
+    generation_strategy: GenerationStrategy | None,
+    adapter: Adapter | None,
+    required_metric_names: Sequence[str] | None,
+) -> str | None:
+    # If using model predictions ensure we have an Adapter which can predict
+    try:
+        adapter = extract_relevant_adapter(
+            experiment=experiment,
+            generation_strategy=generation_strategy,
+            adapter=adapter,
+        )
+
+        if not adapter.can_predict:
+            return (
+                f"Adapter {adapter} does not support predictions, please "
+                "use use_model_predictions=False, provide a suitable "
+                "Adapter, or wait until GenerationStrategy reaches a "
+                "GenerationNode with an adapter that is able to predict."
+            )
+
+        if required_metric_names is not None:
+            experiment = none_throws(experiment)
+
+            required_metric_signatures = [
+                experiment.metrics[name].signature for name in required_metric_names
+            ]
+
+            missing_metric_signatures = {*required_metric_signatures} - {
+                *adapter.metric_signatures
+            }
+
+            missing_metric_names = [
+                experiment.signature_to_metric[signature].name
+                for signature in missing_metric_signatures
+            ]
+
+            if len(missing_metric_names) > 0:
+                return (
+                    f"Adapter {adapter} does not support metrics "
+                    f"{missing_metric_names}."
+                )
+
+    except UserInputError as e:
+        return e.message
+
+    return None

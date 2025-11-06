@@ -20,7 +20,8 @@ from typing import Any, cast, NamedTuple
 import ax.service.utils.early_stopping as early_stopping_utils
 from ax.adapter.adapter_utils import get_fixed_features_from_experiment
 from ax.adapter.base import Adapter
-from ax.core.base_trial import BaseTrial, TrialStatus
+from ax.analysis.plotly.utils import STALE_FAIL_REASON
+from ax.core.base_trial import BaseTrial
 from ax.core.experiment import Experiment
 from ax.core.generator_run import GeneratorRun
 from ax.core.metric import Metric, MetricFetchE, MetricFetchResult
@@ -30,6 +31,7 @@ from ax.core.multi_type_experiment import (
     MultiTypeExperiment,
 )
 from ax.core.runner import Runner
+from ax.core.trial_status import TrialStatus
 from ax.core.utils import get_pending_observation_features_based_on_trial_status
 from ax.exceptions.core import (
     AxError,
@@ -76,7 +78,10 @@ FAILURE_EXCEEDED_MSG = (
     "have either failed, or have been abandoned, potentially automatically due to "
     "issues with the trial."
 )
-
+EXPECTED_STAGED_MSG = (
+    "Expected all trials to be in status {expected} after running or staging, "
+    "found {t_idx_to_status}."
+)
 
 # Wait time b/w reports will not exceed 15 mins.
 MAX_SECONDS_BETWEEN_REPORTS = 900
@@ -151,7 +156,6 @@ class Orchestrator(AnalysisBase, BestPointMixin):
             ax.storage.sqa_store.structs.DBSettings and require SQLAlchemy.
         _skip_experiment_save: If True, Orchestrator will not re-save the
             experiment passed to it. **Use only if the experiment had just
-            been saved, as otherwise experiment state could get corrupted.**
     """
 
     experiment: Experiment
@@ -516,31 +520,45 @@ class Orchestrator(AnalysisBase, BestPointMixin):
                 failed before trial generation because:
                 - they should not be treated as pending points
                 - they will no longer be relevant
+                NOTE: This flag will be removed once all candidate trials have TTL set.
+                It handles legacy candidate trials without TTL that would otherwise
+                remain indefinitely. New TTL-based logic now automatically marks
+                candidates with TTL as stale when expired.
+
 
         Returns:
             List of trials, empty if generation is not possible.
         """
+        stale_candidate_trials_without_ttl = []
         if remove_stale_candidates:
-            stale_candidate_trials = self.experiment.trials_by_status[
-                TrialStatus.CANDIDATE
+            stale_candidate_trials_without_ttl = [
+                trial
+                for trial in self.experiment.trials_by_status[TrialStatus.CANDIDATE]
+                if not trial.ttl_seconds
             ]
-            self.logger.debug(
-                "Marking the following trials as failed because they are stale: "
-                f"{[t.index for t in stale_candidate_trials]}"
-            )
-            for trial in stale_candidate_trials:
-                trial.mark_failed(reason="Newer candidates generated.", unsafe=True)
-        else:
-            stale_candidate_trials = []
+            if stale_candidate_trials_without_ttl:
+                self.logger.info(
+                    f"[Experiment name: {self.experiment._name}] "
+                    "Marking the following trials as failed because they are stale: "
+                    f"{[trial.index for trial in stale_candidate_trials_without_ttl]}"
+                )
+                for trial in stale_candidate_trials_without_ttl:
+                    trial.mark_failed(reason=STALE_FAIL_REASON, unsafe=True)
+
+        # Trigger TTL check to ensure expired trials are marked as stale
+        self.experiment.trials
+
         new_trials, err = self._get_next_trials(
-            num_trials=num_trials,
-            n=self.options.batch_size,
+            num_trials=num_trials, n=self.options.batch_size
         )
+
         if len(new_trials) > 0:
             new_generator_runs = [gr for t in new_trials for gr in t.generator_runs]
             self._save_or_update_trials_and_generation_strategy_if_possible(
                 experiment=self.experiment,
-                trials=new_trials + stale_candidate_trials,
+                trials=new_trials
+                + stale_candidate_trials_without_ttl
+                + self.experiment.trials_by_status[TrialStatus.STALE],
                 generation_strategy=self.generation_strategy,
                 new_generator_runs=new_generator_runs,
                 reduce_state_generator_runs=reduce_state_generator_runs,
@@ -771,7 +789,12 @@ class Orchestrator(AnalysisBase, BestPointMixin):
     # -------- II. Methods that are typically called within the `Orchestrator`. -------
 
     @retry_on_exception(retries=3, no_retry_on_exception_types=NO_RETRY_EXCEPTIONS)
-    def run_trials(self, trials: Iterable[BaseTrial]) -> dict[int, dict[str, Any]]:
+    def run_trials(
+        self,
+        new_trials: list[BaseTrial],
+        existing_trials: list[BaseTrial],
+        stage_only: bool = False,
+    ) -> dict[int, dict[str, Any]]:
         """Deployment function, runs a single evaluation for each of the
         given trials.
 
@@ -783,16 +806,52 @@ class Orchestrator(AnalysisBase, BestPointMixin):
         is desired.
 
         Args:
-            trials: Iterable of trials to be deployed, each containing arms with
-                parameterizations to be evaluated. Can be a ``Trial``
+            existing_trials: Iterable of trials to be deployed, each containing arms
+                with parameterizations to be evaluated. Can be a ``Trial``
                 if contains only one arm or a ``BatchTrial`` if contains
                 multiple arms.
+            new_trials: Iterable of trials to be deployed, each containing arms
+                with parameterizations to be evaluated. Can be a ``Trial``
+                if contains only one arm or a ``BatchTrial`` if contains
+                multiple arms. ``GeneratorRun``-s from the new trials will be saved to
+                the ``GenerationStrategy.generator_runs`` as well as on the trials.
 
         Returns:
             Dict of trial index to the run metadata of that trial from the deployment
             process.
         """
-        return self.runner.run_multiple(trials=trials)
+        if stage_only and not self.runner.staging_required:
+            raise UnsupportedError(
+                "`Orchestrator.run_trials(stage_only=True)` applies only to runners "
+                "that require staging trials before they can be run. "
+                f"Current runner: {self.runner}."
+            )
+        all_trials = [*existing_trials, *new_trials]
+        if not stage_only and self.runner.staging_required:
+            if not all(t.status == TrialStatus.STAGED for t in all_trials):
+                raise AxError(
+                    EXPECTED_STAGED_MSG.format(
+                        t_idx_to_status=[(t.index, t.status) for t in all_trials],
+                        expected=TrialStatus.STAGED,
+                    )
+                )
+
+        idcs_str = make_indices_str(indices=(t.index for t in all_trials))
+        self.logger.info(f"{'Stag' if stage_only else 'Runn'}ing trials {idcs_str}...")
+        # TODO: Add optional timeout between retries of `run_trial(s)`.
+        metadata = self.runner.run_multiple(trials=all_trials)
+        self.logger.debug(f"{'Staged' if stage_only else 'Ran'} trials {idcs_str}.")
+        if self.options.debug_log_run_metadata:
+            self.logger.debug(f"Run metadata: {metadata}.")
+        self._latest_trial_start_timestamp = current_timestamp_in_millis()
+        self._update_and_save_trials(
+            existing_trials=existing_trials,
+            new_trials=new_trials,
+            metadata=metadata,
+            stage_only=stage_only,
+        )
+        self._log_next_no_trials_reason = True
+        return metadata
 
     @retry_on_exception(retries=3, no_retry_on_exception_types=NO_RETRY_EXCEPTIONS)
     def poll_trial_status(
@@ -1090,10 +1149,7 @@ class Orchestrator(AnalysisBase, BestPointMixin):
         Returns:
             Boolean representing success status.
         """
-        (
-            optimization_complete,
-            completion_message,
-        ) = self.should_consider_optimization_complete()
+        optimization_complete, _ = self.should_consider_optimization_complete()
         if optimization_complete:
             return False
 
@@ -1130,19 +1186,8 @@ class Orchestrator(AnalysisBase, BestPointMixin):
             idcs = sorted(t.index for t in existing_trials)
             self.logger.debug(f"Will run pre-existing candidate trials: {idcs}.")
 
-        all_trials = [*existing_trials, *new_trials]
-        idcs_str = make_indices_str(indices=(t.index for t in all_trials))
-        self.logger.info(f"Running trials {idcs_str}...")
         # TODO: Add optional timeout between retries of `run_trial(s)`.
-        metadata = self.run_trials(trials=all_trials)
-        self.logger.debug(f"Ran trials {idcs_str}.")
-        if self.options.debug_log_run_metadata:
-            self.logger.debug(f"Run metadata: {metadata}.")
-        self._latest_trial_start_timestamp = current_timestamp_in_millis()
-        self._update_and_save_trials(
-            existing_trials=existing_trials, new_trials=new_trials, metadata=metadata
-        )
-        self._log_next_no_trials_reason = True
+        self.run_trials(existing_trials=existing_trials, new_trials=new_trials)
         return True
 
     def poll_and_process_results(self, poll_all_trial_statuses: bool = False) -> bool:
@@ -1636,11 +1681,9 @@ class Orchestrator(AnalysisBase, BestPointMixin):
                     generator_runs=generator_run_list,
                     ttl_seconds=self.options.ttl_seconds_for_trials,
                     trial_type=self.trial_type,
+                    should_add_status_quo_arm=self.options.status_quo_weight > 0,
                 )
-                if self.options.status_quo_weight > 0:
-                    trial.add_status_quo_arm(
-                        weight=self.options.status_quo_weight,
-                    )
+
             else:
                 trial = self.experiment.new_trial(
                     generator_run=generator_run_list[0],
@@ -1694,6 +1737,7 @@ class Orchestrator(AnalysisBase, BestPointMixin):
         existing_trials: list[BaseTrial],
         new_trials: list[BaseTrial],
         metadata: dict[int, dict[str, Any]],
+        stage_only: bool,
         reduce_state_generator_runs: bool = False,
     ) -> None:
         """Updates trials with new run metadata and status; saves updates to DB.
@@ -1717,17 +1761,19 @@ class Orchestrator(AnalysisBase, BestPointMixin):
                 batch.
         """
 
-        # pyre-fixme[3]: Return type must be annotated.
-        # pyre-fixme[2]: Parameter must be annotated.
-        def _process_trial(trial):
+        def _process_trial(trial: BaseTrial) -> None:
             if trial.index in metadata:
                 trial.update_run_metadata(metadata=metadata[trial.index])
                 try:
-                    trial.mark_running(no_runner_required=True)
+                    if stage_only:
+                        trial.mark_staged()
+                    else:
+                        trial.mark_running(no_runner_required=True)
                 except ValueError as e:
                     self.logger.warning(
-                        "Unable to mark trial as RUNNING due to the following error:\n"
-                        + str(e)
+                        "Unable to mark trial as "
+                        f"{'STAGED' if stage_only else 'RUNNING'} "
+                        f"due to the following error:\n{str(e)}"
                     )
             else:
                 self.logger.debug(

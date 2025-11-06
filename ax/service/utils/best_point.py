@@ -57,9 +57,7 @@ def derelativize_opt_config(
     experiment: Experiment,
     trial_indices: Iterable[int] | None = None,
 ) -> OptimizationConfig:
-    tf = Derelativize(
-        search_space=None, observations=None, config={"use_raw_status_quo": True}
-    )
+    tf = Derelativize(search_space=None, config={"use_raw_status_quo": True})
     optimization_config = tf.transform_optimization_config(
         optimization_config=optimization_config.clone(),
         adapter=get_tensor_converter_adapter(
@@ -278,9 +276,9 @@ def get_best_parameters_from_model_predictions_with_trial_index(
         if isinstance(trial, Trial):
             gr = trial.generator_run
         elif isinstance(trial, BatchTrial):
-            if len(trial.generator_run_structs) > 0:
+            if len(trial.generator_runs) > 0:
                 # In theory batch_trial can have >1 gr, grab the first
-                gr = trial.generator_run_structs[0].generator_run
+                gr = trial.generator_runs[0]
         if gr is not None:
             break
 
@@ -472,7 +470,7 @@ def get_pareto_optimal_parameters(
     )
 
     # Insert observations into OrderedDict in order of descending individual
-    # hypervolume, formated as
+    # hypervolume, formatted as
     # { trial_index --> (parameterization, (means, covariances) }
     res: dict[int, tuple[TParameterization, TModelPredictArm]] = OrderedDict()
     for obs in pareto_optimal_observations:
@@ -782,6 +780,61 @@ def get_hypervolume_trace_of_outcomes_multi_objective(
     )
 
 
+def _prepare_data_for_trace(
+    df: pd.DataFrame,
+    optimization_config: OptimizationConfig,
+) -> pd.DataFrame:
+    """
+    Prepare data for trace computation by adding feasibility information
+    and reshaping to wide format.
+
+    This function is shared between get_trace_by_arm_pull_from_data and
+    get_is_feasible_trace.
+
+    Args:
+        df: Data in the format returned by ``Data.df``, with a separate row for
+            each trial index-arm name-metric.
+        optimization_config: ``OptimizationConfig`` to use to get the trace. Must
+            not be in relative form.
+
+    Return:
+        A DataFrame with columns ["trial_index", "arm_name", "feasible"] +
+        relevant metric names, where "feasible" indicates whether the arm
+        satisfies all constraints.
+    """
+    # Add feasibility information
+    df["row_feasible"] = _is_row_feasible(
+        df=df,
+        optimization_config=optimization_config,
+        # For the sake of this function, we only care about feasible trials. The
+        # distinction between infeasible and undetermined is not important.
+        undetermined_value=False,
+    )
+
+    # Get the metrics we need
+    metrics = list(optimization_config.metrics.keys())
+
+    # Transform to a DataFrame with columns ["trial_index", "arm_name"] +
+    # relevant metric names, and values being means.
+    df_wide = (
+        df[df["metric_name"].isin(metrics)]
+        .set_index(["trial_index", "arm_name", "metric_name"])["mean"]
+        .unstack(level="metric_name")
+    )
+    missing_metrics = [
+        m for m in metrics if m not in df_wide.columns or df_wide[m].isnull().any()
+    ]
+    if len(missing_metrics) > 0:
+        raise ValueError(
+            "Some metrics are not present for all trials and arms. The "
+            f"following are missing: {missing_metrics}."
+        )
+    df_wide["feasible"] = df.groupby(["trial_index", "arm_name"])["row_feasible"].all()
+    df_wide.reset_index(inplace=True)
+
+    return df_wide
+
+
 def get_trace_by_arm_pull_from_data(
     df: pd.DataFrame,
     optimization_config: OptimizationConfig,
@@ -811,42 +864,13 @@ def get_trace_by_arm_pull_from_data(
             "Relativized optimization config not supported. Please "
             "`Derelativize` the optimization config, or use `get_trace`."
         )
-
     empty_result = pd.DataFrame(columns=["trial_index", "arm_name", "value"])
-
     if len(df) == 0:
         return empty_result
 
-    # reshape data to wide, using only the metrics in the optimization config
-    metrics = list(optimization_config.metrics.keys())
-
-    df["row_feasible"] = _is_row_feasible(
-        df=df,
-        optimization_config=optimization_config,
-        # For the sake of this function, we only care about feasible trials. The
-        # distinction between infeasible and undetermined is not important.
-        undetermined_value=False,
-    )
-
-    # Transform to a DataFrame with columns ["trial_index", "arm_name"] +
-    # relevant metric names, and values being means.
-    df_wide = (
-        df[df["metric_name"].isin(metrics)]
-        .set_index(["trial_index", "arm_name", "metric_name"])["mean"]
-        .unstack(level="metric_name")
-    )
-    missing_metrics = [
-        m for m in metrics if m not in df_wide.columns or df_wide[m].isnull().any()
-    ]
-    if len(missing_metrics) > 0:
-        raise ValueError(
-            "Some metrics are not present for all trials and arms. The "
-            f"following are missing: {missing_metrics}."
-        )
+    df_wide = _prepare_data_for_trace(df=df, optimization_config=optimization_config)
     if len(df_wide) == 0:
         return empty_result
-    df_wide["feasible"] = df.groupby(["trial_index", "arm_name"])["row_feasible"].all()
-    df_wide.reset_index(inplace=True)
 
     # MOO and *not* ScalarizedObjective
     if isinstance(optimization_config.objective, MultiObjective):

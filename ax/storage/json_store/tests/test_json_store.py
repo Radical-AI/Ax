@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from ax.adapter.base import DataLoaderConfig
 from ax.adapter.registry import Generators
+from ax.adapter.transforms.base import Transform
 from ax.adapter.transforms.log import Log
 from ax.adapter.transforms.one_hot import OneHot
 from ax.benchmark.methods.sobol import get_sobol_benchmark_method
@@ -35,9 +36,15 @@ from ax.core.generator_run import GeneratorRun
 from ax.core.map_data import MAP_KEY, MapData
 from ax.core.metric import Metric
 from ax.core.objective import Objective
-from ax.core.parameter import ParameterType
+from ax.core.observation import ObservationFeatures
+from ax.core.optimization_config import (
+    MultiObjectiveOptimizationConfig,
+    OptimizationConfig,
+    PreferenceOptimizationConfig,
+)
+from ax.core.parameter import ChoiceParameter, ParameterType
 from ax.core.runner import Runner
-from ax.exceptions.core import AxStorageWarning
+from ax.exceptions.core import AxStorageWarning, UnsupportedError
 from ax.exceptions.storage import JSONDecodeError, JSONEncodeError
 from ax.generation_strategy.center_generation_node import CenterGenerationNode
 from ax.generation_strategy.generation_node import GenerationNode, GenerationStep
@@ -60,6 +67,7 @@ from ax.storage.json_store.encoder import object_to_json
 from ax.storage.json_store.encoders import (
     botorch_component_to_dict,
     botorch_modular_to_dict,
+    choice_parameter_to_dict,
     metric_to_dict,
     runner_to_dict,
 )
@@ -122,16 +130,12 @@ from ax.utils.testing.core_stubs import (
     get_order_constraint,
     get_outcome_constraint,
     get_parameter_constraint,
-    get_parameter_distribution,
     get_pathlib_path,
     get_percentile_early_stopping_strategy,
-    get_percentile_early_stopping_strategy_with_non_objective_metric_name,
+    get_percentile_early_stopping_strategy_with_non_objective_metric_signature,
     get_range_parameter,
-    get_risk_measure,
-    get_robust_search_space,
     get_scalarized_objective,
     get_search_space,
-    get_sebo_acquisition_class,
     get_sorted_choice_parameter,
     get_sum_constraint1,
     get_sum_constraint2,
@@ -177,10 +181,7 @@ TEST_CASES = [
     ("AuxiliaryExperimentPurpose", lambda: AuxiliaryExperimentPurpose.PE_EXPERIMENT),
     ("BackendSimulator", get_backend_simulator_with_trials),
     ("BatchTrial", get_batch_trial),
-    (
-        "BenchmarkMethod",
-        lambda: get_sobol_benchmark_method(distribute_replications=True),
-    ),
+    ("BenchmarkMethod", get_sobol_benchmark_method),
     ("BenchmarkMetric", get_benchmark_metric),
     ("BenchmarkMapMetric", get_benchmark_map_metric),
     ("BenchmarkTimeVaryingMetric", get_benchmark_time_varying_metric),
@@ -214,7 +215,10 @@ TEST_CASES = [
         partial(get_hierarchical_choice_parameter, parameter_type=ParameterType.STRING),
     ),
     # testing with non-default argument
-    ("DataLoaderConfig", partial(DataLoaderConfig, fit_out_of_design=True)),
+    (
+        "DataLoaderConfig",
+        partial(DataLoaderConfig, fit_only_completed_map_metrics=True),
+    ),
     ("DerivedParameter", get_derived_parameter),
     ("Experiment", get_experiment_with_batch_and_single_trial),
     ("Experiment", get_experiment_with_trial_with_ttl),
@@ -226,6 +230,16 @@ TEST_CASES = [
     ("FixedParameter", get_fixed_parameter),
     ("FixedParameter", partial(get_fixed_parameter, with_dependents=True)),
     ("GammaPrior", get_gamma_prior),
+    (
+        "GenerationStep",
+        partial(
+            GenerationStep,
+            generator=Generators.SOBOL,
+            num_trials=5,
+            min_trials_observed=3,
+            use_all_trials_in_exp=True,
+        ),
+    ),
     ("GenerationStrategy", partial(get_generation_strategy, with_experiment=True)),
     (
         "GenerationStrategy",
@@ -297,6 +311,7 @@ TEST_CASES = [
     ("MultiObjective", get_multi_objective),
     ("MultiObjectiveOptimizationConfig", get_multi_objective_optimization_config),
     ("MultiTypeExperiment", get_multi_type_experiment),
+    ("MultiTypeExperiment", partial(get_multi_type_experiment, add_trials=True)),
     ("ObservationFeatures", get_observation_features),
     ("Objective", get_objective),
     ("ObjectiveThreshold", get_objective_threshold),
@@ -308,13 +323,10 @@ TEST_CASES = [
     ("PercentileEarlyStoppingStrategy", get_percentile_early_stopping_strategy),
     (
         "PercentileEarlyStoppingStrategy",
-        get_percentile_early_stopping_strategy_with_non_objective_metric_name,
+        get_percentile_early_stopping_strategy_with_non_objective_metric_signature,
     ),
     ("ParameterConstraint", get_parameter_constraint),
-    ("ParameterDistribution", get_parameter_distribution),
     ("RangeParameter", get_range_parameter),
-    ("RiskMeasure", get_risk_measure),
-    ("RobustSearchSpace", get_robust_search_space),
     ("ScalarizedObjective", get_scalarized_objective),
     ("OrchestratorOptions", get_default_orchestrator_options),
     ("OrchestratorOptions", get_orchestrator_options_batch_trial),
@@ -328,6 +340,7 @@ TEST_CASES = [
     ("Type[Model]", get_model_type),
     ("Type[MarginalLogLikelihood]", get_mll_type),
     ("Type[Transform]", get_transform_type),
+    ("Type[Transform]", lambda: Transform),
     ("Type[InputTransform]", get_input_transform_type),
     ("Type[OutcomeTransform]", get_outcome_transfrom_type),
     ("Type[TransformToNewSQ]", get_to_new_sq_transform_type),
@@ -335,7 +348,6 @@ TEST_CASES = [
     ("ThresholdEarlyStoppingStrategy", get_threshold_early_stopping_strategy),
     ("Trial", get_trial),
     ("WinsorizationConfig", get_winsorization_config),
-    ("SEBOAcquisition", get_sebo_acquisition_class),
 ]
 
 
@@ -650,9 +662,9 @@ class JSONStoreTest(TestCase):
 
             # The "timestamp" map key will be silently dropped, and "epoch" will
             # be renamed to MAP_KEY
-            self.assertIn(MAP_KEY, map_data.true_df.columns)
+            self.assertIn(MAP_KEY, map_data.full_df.columns)
             # Either 'epoch' or 'timestamps' could have been kept
-            progression = map_data.true_df[MAP_KEY].tolist()
+            progression = map_data.full_df[MAP_KEY].tolist()
             self.assertTrue(progression == [0.0, 1.0] or progression == [3.0, 4.0])
 
         with self.subTest("Single map key"):
@@ -677,8 +689,8 @@ class JSONStoreTest(TestCase):
             self.assertIn(
                 f"epoch will be renamed to {MAP_KEY}", str(warning_list[0].message)
             )
-            self.assertIn(MAP_KEY, map_data.true_df.columns)
-            self.assertEqual(map_data.true_df[MAP_KEY].tolist(), [0.0, 1.0])
+            self.assertIn(MAP_KEY, map_data.full_df.columns)
+            self.assertEqual(map_data.full_df[MAP_KEY].tolist(), [0.0, 1.0])
             # No warning about multiple map keys
             self.assertFalse(any("Received multiple" in str(w) for w in warning_list))
 
@@ -937,6 +949,20 @@ class JSONStoreTest(TestCase):
             del expected_json["state_dict"]["lower_bound"]
             botorch_component_from_json(interval.__class__, expected_json)
 
+    def test_observation_features_backward_compatibility(self) -> None:
+        json = {
+            "__type": "ObservationFeatures",
+            "parameters": {"x1": 0.0},
+            "trial_index": 0,
+            "random_split": 4,
+        }
+        with self.assertLogs(logger="ax", level="WARNING") as cm:
+            decoded = object_from_json(object_json=json)
+        self.assertTrue(any("random_split" in w for w in cm.output))
+        self.assertIsInstance(decoded, ObservationFeatures)
+        self.assertEqual(decoded.parameters, {"x1": 0.0})
+        self.assertEqual(decoded.trial_index, 0)
+
     def test_objective_backwards_compatibility(self) -> None:
         # Test that we can load an objective that has conflicting
         # ``lower_is_better`` and ``minimize`` fields.
@@ -968,6 +994,9 @@ class JSONStoreTest(TestCase):
                 "status_quo_name": "status_quo",
                 "status_quo_features": None,
                 "other_kwarg": 5,
+                "fit_out_of_design": True,
+                "fit_abandoned": True,
+                "fit_only_completed_map_metrics": True,
             },
             "model_gen_kwargs": {},
             "index": -1,
@@ -1020,7 +1049,9 @@ class JSONStoreTest(TestCase):
                 "fit_tracking_metrics": True,
                 "fit_on_init": True,
             },
-            "gen_metadata": {},
+            "gen_metadata": {
+                "model_fit_quality": None,
+            },
             "model_state_after_gen": None,
             "generation_step_index": None,
             "candidate_metadata_by_arm_signature": None,
@@ -1038,8 +1069,6 @@ class JSONStoreTest(TestCase):
                 "transforms": {},
                 "transform_configs": None,
                 "optimization_config": None,
-                "fit_out_of_design": False,
-                "fit_abandoned": False,
                 "fit_tracking_metrics": True,
                 "fit_on_init": True,
             },
@@ -1109,7 +1138,7 @@ class JSONStoreTest(TestCase):
         }
         node = generation_node_from_json(json)
         self.assertIsInstance(node, GenerationNode)
-        self.assertEqual(node.node_name, "Test")
+        self.assertEqual(node.name, "Test")
         self.assertEqual(len(node.transition_criteria), 1)
         # Status quo is discarded, so we have 2 input constructors left.
         self.assertEqual(len(node.input_constructors), 2)
@@ -1295,6 +1324,203 @@ class JSONStoreTest(TestCase):
         expected_object = get_multi_objective()
         self.assertEqual(deserialized_object, expected_object)
 
+    def test_optimization_config_with_pruning_target_json_roundtrip(self) -> None:
+        # Test that OptimizationConfig with pruning_target_parameterization can
+        # be serialized/deserialized correctly
+
+        # Setup: create OptimizationConfig with pruning_target_parameterization
+        pruning_target_parameterization = get_arm()
+        optimization_config = OptimizationConfig(
+            objective=Objective(metric=Metric("test_metric"), minimize=False),
+            pruning_target_parameterization=pruning_target_parameterization,
+        )
+
+        # Execute: serialize and deserialize through JSON
+        json_data = object_to_json(
+            optimization_config,
+            encoder_registry=CORE_ENCODER_REGISTRY,
+            class_encoder_registry=CORE_CLASS_ENCODER_REGISTRY,
+        )
+
+        # Simulate full serialization round-trip
+        json_str = json.dumps(json_data)
+        json_data = json.loads(json_str)
+
+        deserialized_config = object_from_json(
+            json_data,
+            decoder_registry=CORE_DECODER_REGISTRY,
+            class_decoder_registry=CORE_CLASS_DECODER_REGISTRY,
+        )
+
+        # Assert: confirm pruning_target_parameterization is preserved correctly
+        self.assertEqual(optimization_config, deserialized_config)
+        self.assertIsNotNone(deserialized_config.pruning_target_parameterization)
+        self.assertEqual(
+            optimization_config.pruning_target_parameterization,
+            deserialized_config.pruning_target_parameterization,
+        )
+
+    def test_multi_objective_optimization_config_with_pruning_target_json_roundtrip(
+        self,
+    ) -> None:
+        # Test that MultiObjectiveOptimizationConfig with
+        # pruning_target_parameterization can be
+        # serialized/deserialized correctly
+
+        # Setup: create MultiObjectiveOptimizationConfig with
+        # pruning_target_parameterization
+        pruning_target_parameterization = get_arm()
+        multi_objective_config = MultiObjectiveOptimizationConfig(
+            objective=get_multi_objective(),
+            pruning_target_parameterization=pruning_target_parameterization,
+        )
+
+        # Execute: serialize and deserialize through JSON
+        json_data = object_to_json(
+            multi_objective_config,
+            encoder_registry=CORE_ENCODER_REGISTRY,
+            class_encoder_registry=CORE_CLASS_ENCODER_REGISTRY,
+        )
+
+        # Simulate full serialization round-trip
+        json_str = json.dumps(json_data)
+        json_data = json.loads(json_str)
+
+        deserialized_config = object_from_json(
+            json_data,
+            decoder_registry=CORE_DECODER_REGISTRY,
+            class_decoder_registry=CORE_CLASS_DECODER_REGISTRY,
+        )
+
+        # Assert: confirm pruning_target_parameterization is preserved correctly
+        self.assertEqual(multi_objective_config, deserialized_config)
+        self.assertIsNotNone(deserialized_config.pruning_target_parameterization)
+        self.assertEqual(
+            multi_objective_config.pruning_target_parameterization,
+            deserialized_config.pruning_target_parameterization,
+        )
+
+    def test_preference_optimization_config_with_pruning_target_json_roundtrip(
+        self,
+    ) -> None:
+        # Test that PreferenceOptimizationConfig with
+        # pruning_target_parameterization can be
+        # serialized/deserialized correctly
+
+        # Setup: create PreferenceOptimizationConfig with
+        # pruning_target_parameterization
+        pruning_target_parameterization = get_arm()
+        preference_config = PreferenceOptimizationConfig(
+            objective=get_multi_objective(),
+            pruning_target_parameterization=pruning_target_parameterization,
+            preference_profile_name="default",
+        )
+
+        # Execute: serialize and deserialize through JSON
+        json_data = object_to_json(
+            preference_config,
+            encoder_registry=CORE_ENCODER_REGISTRY,
+            class_encoder_registry=CORE_CLASS_ENCODER_REGISTRY,
+        )
+
+        # Simulate full serialization round-trip
+        json_str = json.dumps(json_data)
+        json_data = json.loads(json_str)
+
+        deserialized_config = object_from_json(
+            json_data,
+            decoder_registry=CORE_DECODER_REGISTRY,
+            class_decoder_registry=CORE_CLASS_DECODER_REGISTRY,
+        )
+
+        # Assert: confirm pruning_target_parameterization is preserved correctly
+        self.assertEqual(preference_config, deserialized_config)
+        self.assertIsNotNone(deserialized_config.pruning_target_parameterization)
+        self.assertEqual(
+            preference_config.pruning_target_parameterization,
+            deserialized_config.pruning_target_parameterization,
+        )
+
+    def test_optimization_config_with_none_pruning_target_json_roundtrip(self) -> None:
+        # Test that OptimizationConfig with
+        # pruning_target_parameterization=None is handled correctly
+
+        # Setup: create OptimizationConfig without
+        # pruning_target_parameterization
+        optimization_config = OptimizationConfig(
+            objective=Objective(metric=Metric("test_metric"), minimize=False),
+            pruning_target_parameterization=None,
+        )
+
+        # Execute: serialize and deserialize through JSON
+        json_data = object_to_json(
+            optimization_config,
+            encoder_registry=CORE_ENCODER_REGISTRY,
+            class_encoder_registry=CORE_CLASS_ENCODER_REGISTRY,
+        )
+
+        # Simulate full serialization round-trip
+        json_str = json.dumps(json_data)
+        json_data = json.loads(json_str)
+
+        deserialized_config = object_from_json(
+            json_data,
+            decoder_registry=CORE_DECODER_REGISTRY,
+            class_decoder_registry=CORE_CLASS_DECODER_REGISTRY,
+        )
+
+        # Assert: confirm pruning_target_parameterization remains None
+        self.assertEqual(optimization_config, deserialized_config)
+        self.assertIsNone(deserialized_config.pruning_target_parameterization)
+
+    def test_experiment_with_pruning_target_json_roundtrip(self) -> None:
+        # Test that Experiment with optimization_config containing
+        # pruning_target_parameterization is
+        # serialized correctly
+
+        # Setup: create experiment with pruning_target_parameterization in optimization
+        # config
+        experiment = get_branin_experiment()
+        pruning_target_parameterization = get_arm()
+        optimization_config = none_throws(
+            experiment.optimization_config
+        ).clone_with_args(
+            pruning_target_parameterization=pruning_target_parameterization
+        )
+        experiment.optimization_config = optimization_config
+
+        # Execute: save and load experiment through JSON
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json") as f:
+            save_experiment(
+                experiment,
+                f.name,
+                encoder_registry=CORE_ENCODER_REGISTRY,
+                class_encoder_registry=CORE_CLASS_ENCODER_REGISTRY,
+            )
+            loaded_experiment = load_experiment(
+                f.name,
+                decoder_registry=CORE_DECODER_REGISTRY,
+                class_decoder_registry=CORE_CLASS_DECODER_REGISTRY,
+            )
+
+        # Cleanup
+        os.remove(f.name)
+
+        # Assert: confirm experiment and pruning_target_parameterization
+        # are preserved correctly
+        self.assertEqual(experiment, loaded_experiment)
+        self.assertIsNotNone(
+            none_throws(
+                loaded_experiment.optimization_config
+            ).pruning_target_parameterization
+        )
+        self.assertEqual(
+            none_throws(experiment.optimization_config).pruning_target_parameterization,
+            none_throws(
+                loaded_experiment.optimization_config
+            ).pruning_target_parameterization,
+        )
+
     def test_multi_objective_from_json_warning(self) -> None:
         objectives = [get_objective()]
 
@@ -1311,6 +1537,21 @@ class JSONStoreTest(TestCase):
         self.assertTrue(
             any("Found unexpected kwargs" in warning for warning in cm.output)
         )
+
+    def test_choice_parameter_bypass_cardinality_check_encode_failure(self) -> None:
+        choice_parameter = ChoiceParameter(
+            name="test_choice",
+            parameter_type=ParameterType.INT,
+            values=[1, 2, 3],
+            bypass_cardinality_check=True,
+        )
+        with self.assertRaisesRegex(
+            UnsupportedError,
+            "`bypass_cardinality_check` should only be set to True "
+            "when constructing parameters within the modeling layer. It is not "
+            "supported for storage.",
+        ):
+            choice_parameter_to_dict(choice_parameter)
 
     def test_surrogate_spec_backwards_compatibility(self) -> None:
         # This is an invalid example that has both deprecated args
@@ -1414,3 +1655,13 @@ class JSONStoreTest(TestCase):
         # Check for models with no replacement.
         with self.assertRaisesRegex(KeyError, "nonexistent"):
             object_from_json({"__type": "Models", "name": "nonexistent_model"})
+
+    def test_optimization_config_backwards_compatibility(self) -> None:
+        # Check that opt config json with risk measure can be loaded.
+        opt_config = get_optimization_config()
+        opt_config_json = object_to_json(opt_config)
+        # Add risk measure.
+        opt_config_json["risk_measure"] = None
+        # Decode and compare.
+        decoded_opt_config = object_from_json(opt_config_json)
+        self.assertEqual(opt_config, decoded_opt_config)

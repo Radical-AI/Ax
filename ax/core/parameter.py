@@ -1060,7 +1060,7 @@ class DerivedParameter(Parameter):
             self._intercept
             + sum(
                 self._parameter_names_to_weights[parameter_name]
-                * float(parameters[parameter_name])
+                * float(parameters.get(parameter_name, 0.0))
                 for parameter_name in self._parameter_names_to_weights
             )
         )

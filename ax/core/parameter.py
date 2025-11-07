@@ -1060,7 +1060,7 @@ class DerivedParameter(Parameter):
             self._intercept
             + sum(
                 self._parameter_names_to_weights[parameter_name]
-                * float(parameters.get(parameter_name, 0.0))
+                * float(parameters.get(parameter_name, 0.0))  # NOTE: this is not general solution. It is a rough patch based on our definition of sparse target as zero vector when using SEBO
                 for parameter_name in self._parameter_names_to_weights
             )
         )
